@@ -242,7 +242,6 @@ def evaluate_ablation_vllm(
     )
 
     base_eval.ensure_results_dir(output_file)
-    dropped_log_file = output_file + ".dropped.jsonl"
 
     total = len(benchmark_items)
     dropped_total = 0
@@ -252,121 +251,64 @@ def evaluate_ablation_vllm(
 
     max_prediction_attempts = max_prediction_retries + 1
 
-    with open(output_file, "w", encoding="utf-8") as out_f, open(
-        dropped_log_file, "w", encoding="utf-8"
-    ) as dropped_f:
-
-        def record_dropped_item(
-            item: Dict[str, Any],
-            reason: str,
-            stage: str,
-            sample_idx: Optional[int] = None,
-            batch_idx: Optional[int] = None,
-            sample_idx_in_batch: Optional[int] = None,
-            error: Optional[BaseException] = None,
-        ) -> None:
-            nonlocal dropped_total
-            dropped_record: Dict[str, Any] = {
-                "dataset_type": item.get("dataset_type"),
-                "data_id": item.get("data_id"),
-                "url_id": item.get("url_id"),
-                "title": item.get("title"),
-                "ablation_mode": ablation_mode,
-                "stage": stage,
-                "reason": reason,
-            }
-            if sample_idx is not None:
-                dropped_record["sample_index"] = sample_idx
-            if batch_idx is not None:
-                dropped_record["batch_index"] = batch_idx
-            if sample_idx_in_batch is not None:
-                dropped_record["sample_index_in_batch"] = sample_idx_in_batch
-            if error is not None:
-                dropped_record["error_type"] = type(error).__name__
-                dropped_record["error_message"] = str(error)[:800]
-
-            dropped_f.write(json.dumps(dropped_record, ensure_ascii=False) + "\n")
-            dropped_total += 1
-
-        # Stage-1: 预检与输入构建
-        print(f"[{ablation_mode}] [Stage-1] 开始预检，总样本 {total} 条")
-        valid_samples: List[Dict[str, Any]] = []
-        for sample_idx, item in enumerate(benchmark_items):
-            try:
-                messages, raw_input, normalized = build_messages_for_ablation(item, ablation_mode)
-
-                if ablation_mode == "image_only":
-                    missing_paths = [p for p in raw_input["images"] if not os.path.exists(p)]
-                    if missing_paths:
-                        record_dropped_item(
-                            item=item,
-                            reason="missing_image",
-                            stage="precheck",
-                            sample_idx=sample_idx,
-                        )
-                        continue
-
-                sample_input = prepare_inputs_for_ablation(
-                    messages=messages,
-                    processor=processor,
-                    model_path=model_path,
-                    ablation_mode=ablation_mode,
-                )
-                valid_samples.append(
-                    {
-                        "item": item,
-                        "raw_input": raw_input,
-                        "normalized": normalized,
-                        "sample_input": sample_input,
-                    }
-                )
-            except Exception as err:
-                reason = "bad_image_precheck" if base_eval.is_bad_image_error(err) else "precheck_exception"
-                record_dropped_item(
-                    item=item,
-                    reason=reason,
-                    stage="precheck",
-                    sample_idx=sample_idx,
-                    error=err,
-                )
-
-        print(
-            f"[{ablation_mode}] [Stage-1] 通过 {len(valid_samples)} 条，"
-            f"剔除 {dropped_total} 条"
-        )
-
-        if not valid_samples:
-            raise ValueError(f"[{ablation_mode}] No valid sample left after precheck")
-
-        # Stage-2: 正式推理
-        print(f"[{ablation_mode}] [Stage-2] 开始推理")
+    with open(output_file, "w", encoding="utf-8") as out_f:
+        print(f"[{ablation_mode}] [Stage-2] 开始推理，总样本 {total} 条")
         llm, resolved_llm_kwargs = base_eval.build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
 
-        num_batches = (len(valid_samples) + batch_size - 1) // batch_size
+        num_batches = (len(benchmark_items) + batch_size - 1) // batch_size
         for batch_idx in range(num_batches):
             start = batch_idx * batch_size
-            end = min(start + batch_size, len(valid_samples))
-            batch_samples = valid_samples[start:end]
-            batch_inputs = [sample["sample_input"] for sample in batch_samples]
+            end = min(start + batch_size, len(benchmark_items))
+            batch_items = benchmark_items[start:end]
 
+            batch_samples: List[Dict[str, Any]] = []
+            for item in batch_items:
+                try:
+                    messages, raw_input, normalized = build_messages_for_ablation(item, ablation_mode)
+                    sample_input = prepare_inputs_for_ablation(
+                        messages=messages,
+                        processor=processor,
+                        model_path=model_path,
+                        ablation_mode=ablation_mode,
+                    )
+                    batch_samples.append(
+                        {
+                            "item": item,
+                            "raw_input": raw_input,
+                            "normalized": normalized,
+                            "sample_input": sample_input,
+                        }
+                    )
+                except Exception as build_err:
+                    dropped_total += 1
+                    reason = (
+                        "bad_image_inference"
+                        if base_eval.is_bad_image_error(build_err)
+                        else "input_prepare_exception"
+                    )
+                    print(
+                        f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} 构建输入失败并跳过 1 条："
+                        f"reason={reason}, data_id={item.get('data_id')}, "
+                        f"error={type(build_err).__name__}: {build_err}"
+                    )
+
+            if not batch_samples:
+                print(
+                    f"[{ablation_mode}] [Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
+                    f"该 batch 无可推理样本（累计跳过 {dropped_total} 条）"
+                )
+                continue
+
+            batch_inputs = [sample["sample_input"] for sample in batch_samples]
             try:
                 outputs = list(llm.generate(batch_inputs, sampling_params=sampling_params))
             except Exception as err:
                 if base_eval.is_mm_cache_assertion(err):
+                    dropped_total += len(batch_samples)
                     print(
                         f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
-                        "重建引擎并跳过该 batch。"
+                        f"跳过该 batch {len(batch_samples)} 条并重建引擎。"
                     )
-                    for sample_idx_in_batch, sample in enumerate(batch_samples):
-                        record_dropped_item(
-                            item=sample["item"],
-                            reason="mm_cache_assertion_inference",
-                            stage="inference",
-                            batch_idx=batch_idx + 1,
-                            sample_idx_in_batch=sample_idx_in_batch,
-                            error=err,
-                        )
-                    base_eval.flush_and_sync(dropped_f)
                     try:
                         del llm
                         llm, _ = base_eval.build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
@@ -495,10 +437,10 @@ def evaluate_ablation_vllm(
                 }
                 out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-            base_eval.flush_and_sync(out_f, dropped_f)
+            base_eval.flush_and_sync(out_f)
             print(
                 f"[{ablation_mode}] [Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                f"累计处理 {end}/{len(valid_samples)}"
+                f"累计处理 {end}/{len(benchmark_items)}，累计跳过 {dropped_total}"
             )
 
     if evaluated_total <= 0:
@@ -523,7 +465,6 @@ def evaluate_ablation_vllm(
         "partial_accuracy": partial_acc,
         "dropped_samples": dropped_total,
         "output_file": output_file,
-        "dropped_log_file": dropped_log_file,
         "tensor_parallel_size": tensor_parallel_size,
         "requested_data_parallel_size": requested_data_parallel_size,
         "effective_data_parallel_size": effective_data_parallel_size,

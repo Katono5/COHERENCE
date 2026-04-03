@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import argparse
-from collections import Counter
 import json
 import os
 import random
@@ -181,58 +180,6 @@ def prepare_output_file_for_resume(output_file: str) -> Dict[str, int]:
         "requeued_count": len(requeued_keys),
         "kept_count": len(latest_records) - len(requeued_keys),
     }
-
-
-def load_existing_dropped_results(dropped_log_file: str) -> Dict[str, Any]:
-    if not os.path.exists(dropped_log_file):
-        return {"count": 0, "keys": set()}
-
-    count = 0
-    keys: Set[str] = set()
-    with open(dropped_log_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            count += 1
-            keys.add(make_item_key(record))
-    return {"count": count, "keys": keys}
-
-
-def remove_items_from_jsonl(jsonl_path: str, items_to_remove: List[Dict[str, Any]]) -> int:
-    if not items_to_remove:
-        return 0
-
-    remove_counter: Counter = Counter(make_item_key(item) for item in items_to_remove)
-    tmp_path = f"{jsonl_path}.tmp"
-    removed = 0
-
-    with open(jsonl_path, "r", encoding="utf-8") as src, open(
-        tmp_path, "w", encoding="utf-8"
-    ) as dst:
-        for line in src:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            try:
-                obj = json.loads(stripped)
-            except json.JSONDecodeError:
-                dst.write(line)
-                continue
-
-            key = make_item_key(obj)
-            if remove_counter.get(key, 0) > 0:
-                remove_counter[key] -= 1
-                removed += 1
-                continue
-            dst.write(line)
-
-    os.replace(tmp_path, jsonl_path)
-    return removed
 
 
 def collect_pending_items(items: List[Dict[str, Any]], skip_keys: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
@@ -650,10 +597,9 @@ def evaluate_vllm(
     tensor_parallel_size: int = 1,
     data_parallel_size: int = 1,
     disable_mm_preprocessor_cache: bool = True,
-    remove_bad_samples_from_benchmark: bool = True,
     max_prediction_retries: int = 10,
 ) -> Dict[str, Any]:
-    """单个 benchmark 文件的 vLLM 评测（two-stage: 预检 -> 推理）。"""
+    """单个 benchmark 文件的 vLLM 评测（按 batch 直接推理，不做预检）。"""
     from vllm import LLM, SamplingParams
 
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -692,28 +638,23 @@ def evaluate_vllm(
     )
 
     total = len(benchmark_items)
-    dropped_items: List[Dict[str, Any]] = []
-    removed_from_benchmark_file = 0
+    dropped_total = 0
     if max_prediction_retries < 0:
         raise ValueError("max_prediction_retries must be >= 0")
     max_prediction_attempts = max_prediction_retries + 1
 
     ensure_results_dir(output_file)
-    dropped_log_file = output_file + ".dropped.jsonl"
     resume_cleanup = prepare_output_file_for_resume(output_file)
     requeued_count = int(resume_cleanup.get("requeued_count", 0))
     resume_eval_info = load_existing_eval_results(output_file)
-    resume_dropped_info = load_existing_dropped_results(dropped_log_file)
     evaluated_total = int(resume_eval_info["count"])
     exact_correct = float(resume_eval_info["exact_sum"])
     partial_score_sum = float(resume_eval_info["partial_sum"])
     null_prediction_count = int(resume_eval_info.get("null_count", 0))
-    dropped_total = int(resume_dropped_info["count"])
-    resumed = bool(evaluated_total > 0 or dropped_total > 0 or requeued_count > 0)
+    resumed = bool(evaluated_total > 0 or requeued_count > 0)
 
     completed_keys = set(resume_eval_info["keys"])
-    dropped_keys = set(resume_dropped_info["keys"])
-    skip_keys = completed_keys | dropped_keys
+    skip_keys = completed_keys
     pending_items, duplicate_pending_count = collect_pending_items(benchmark_items, skip_keys)
 
     if requeued_count > 0:
@@ -730,7 +671,7 @@ def evaluate_vllm(
     if resumed:
         print(
             f"检测到已有结果：已评测 {evaluated_total}/{total} 条，"
-            f"历史 dropped {dropped_total} 条，历史 prediction=null {null_prediction_count} 条"
+            f"历史 prediction=null {null_prediction_count} 条"
             f"（将自动重跑），本次剩余 {len(pending_items)} 条。"
         )
 
@@ -755,16 +696,12 @@ def evaluate_vllm(
             "exact_correct": int(exact_correct),
             "exact_accuracy": exact_acc,
             "partial_accuracy": partial_acc,
-            "dropped_samples": dropped_total,
-            "removed_from_benchmark_file": 0,
-            "dropped_log_file": dropped_log_file,
+            "dropped_samples": 0,
             "output_file": output_file,
             "resumed": True,
         }
 
-    with open(output_file, "a" if resumed else "w", encoding="utf-8") as out_f, open(
-        dropped_log_file, "a" if dropped_total > 0 else "w", encoding="utf-8"
-    ) as dropped_f:
+    with open(output_file, "a" if resumed else "w", encoding="utf-8") as out_f:
 
         def record_result(
             generated_text: str,
@@ -814,221 +751,155 @@ def evaluate_vllm(
             }
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        def record_dropped_item(
-            item: Dict[str, Any],
-            reason: str,
-            stage: str,
-            sample_idx: Optional[int] = None,
-            batch_idx: Optional[int] = None,
-            sample_idx_in_batch: Optional[int] = None,
-            error: Optional[BaseException] = None,
-            extra: Optional[Dict[str, Any]] = None,
-        ) -> None:
-            nonlocal dropped_total
-            dropped_items.append(item)
-            dropped_record: Dict[str, Any] = {
-                "dataset_type": item.get("dataset_type"),
-                "data_id": item.get("data_id"),
-                "url_id": item.get("url_id"),
-                "title": item.get("title"),
-                "stage": stage,
-                "reason": reason,
-            }
-            if sample_idx is not None:
-                dropped_record["sample_index"] = sample_idx
-            if batch_idx is not None:
-                dropped_record["batch_index"] = batch_idx
-            if sample_idx_in_batch is not None:
-                dropped_record["sample_index_in_batch"] = sample_idx_in_batch
-            if error is not None:
-                dropped_record["error_type"] = type(error).__name__
-                dropped_record["error_message"] = str(error)[:800]
-            if extra:
-                dropped_record.update(extra)
-            dropped_f.write(json.dumps(dropped_record, ensure_ascii=False) + "\n")
-            dropped_total += 1
+        print(f"[Stage-2] 开始推理，本次待处理 {len(pending_items)} 条（总样本 {total}）。")
+        llm, resolved_llm_kwargs = build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
 
-        # Stage-1: 预检（只构造和检查输入，不做正式推理）
-        print(f"[Stage-1] 开始预检，本次待处理 {len(pending_items)} 条（总样本 {total}）。")
-        valid_samples: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
-        for sample_idx, item in enumerate(pending_items):
-            try:
-                messages, raw_input, normalized = build_messages_for_vllm(item)
-                missing_paths = [p for p in raw_input["images"] if not os.path.exists(p)]
-                if missing_paths:
-                    record_dropped_item(
-                        item=item,
-                        reason="missing_image",
-                        stage="precheck",
-                        sample_idx=sample_idx,
-                        extra={
-                            "missing_count": len(missing_paths),
-                            "first_missing_path": missing_paths[0],
-                        },
+        num_batches = (len(pending_items) + batch_size - 1) // batch_size
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, len(pending_items))
+            batch_items = pending_items[start:end]
+
+            batch_samples: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
+            for item in batch_items:
+                try:
+                    messages, raw_input, normalized = build_messages_for_vllm(item)
+                    sample_input = prepare_inputs_for_vllm(messages, processor, model_path)
+                    batch_samples.append((item, raw_input, normalized, sample_input))
+                except Exception as build_err:
+                    dropped_total += 1
+                    reason = (
+                        "bad_image_inference" if is_bad_image_error(build_err) else "input_prepare_exception"
                     )
-                    continue
-                inputs = prepare_inputs_for_vllm(messages, processor, model_path)
-                valid_samples.append((item, raw_input, normalized, inputs))
-            except Exception as err:
-                reason = "bad_image_precheck" if is_bad_image_error(err) else "precheck_exception"
-                record_dropped_item(
-                    item=item,
-                    reason=reason,
-                    stage="precheck",
-                    sample_idx=sample_idx,
-                    error=err,
-                )
+                    print(
+                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 构建输入失败并跳过 1 条："
+                        f"reason={reason}, data_id={item.get('data_id')}, "
+                        f"error={type(build_err).__name__}: {build_err}"
+                    )
 
-        print(
-            f"[Stage-1] 预检完成：通过 {len(valid_samples)} 条，"
-            f"新增剔除 {len(dropped_items)} 条（累计 {dropped_total} 条）。"
-        )
-
-        if remove_bad_samples_from_benchmark and benchmark_file:
-            removed_from_benchmark_file = remove_items_from_jsonl(benchmark_file, dropped_items)
-            if removed_from_benchmark_file > 0:
+            if not batch_samples:
                 print(
-                    "[Stage-1] 已从 benchmark 文件删除预检失败样本: "
-                    f"{removed_from_benchmark_file} 条"
+                    f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
+                    f"该 batch 无可推理样本（累计跳过 {dropped_total} 条）"
+                )
+                continue
+
+            batch_inputs = [sample[3] for sample in batch_samples]
+            try:
+                outputs = list(llm.generate(batch_inputs, sampling_params=sampling_params))
+            except Exception as err:
+                if is_mm_cache_assertion(err):
+                    dropped_total += len(batch_samples)
+                    print(
+                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
+                        f"跳过该 batch {len(batch_samples)} 条并重建引擎后继续。"
+                    )
+                    try:
+                        del llm
+                        llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
+                    except Exception:
+                        raise
+                    continue
+                raise
+
+            sample_states: List[Dict[str, Any]] = []
+            for sample_idx_in_batch, (item, raw_input, normalized, sample_input) in enumerate(batch_samples):
+                generated_text = ""
+                if sample_idx_in_batch < len(outputs):
+                    output = outputs[sample_idx_in_batch]
+                    if output is not None and getattr(output, "outputs", None):
+                        generated_text = output.outputs[0].text or ""
+                sample_states.append(
+                    {
+                        "item": item,
+                        "raw_input": raw_input,
+                        "normalized": normalized,
+                        "sample_input": sample_input,
+                        "generated_text": generated_text,
+                        "attempts_used": 1,
+                        "retry_errors": [],
+                    }
                 )
 
-        if valid_samples:
-            print(f"[Stage-2] 开始正式推理，仅处理 {len(valid_samples)} 条通过预检样本。")
-            llm, resolved_llm_kwargs = build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
+            pending_indices = [
+                idx
+                for idx, state in enumerate(sample_states)
+                if parse_prediction_list(state["generated_text"]) is None
+            ]
+            if pending_indices:
+                print(
+                    f"[Stage-2] batch {batch_idx + 1}/{num_batches} 首轮后有 "
+                    f"{len(pending_indices)}/{len(sample_states)} 条 prediction=null，"
+                    f"将按批重试（最多 {max_prediction_retries} 轮）。"
+                )
 
-            num_batches = (len(valid_samples) + batch_size - 1) // batch_size
-            for batch_idx in range(num_batches):
-                start = batch_idx * batch_size
-                end = min(start + batch_size, len(valid_samples))
-                batch_samples = valid_samples[start:end]
-                batch_inputs = [sample[3] for sample in batch_samples]
+            for attempt_idx in range(2, max_prediction_attempts + 1):
+                if not pending_indices:
+                    break
+
+                retry_inputs = [sample_states[idx]["sample_input"] for idx in pending_indices]
+                for idx in pending_indices:
+                    sample_states[idx]["attempts_used"] = attempt_idx
 
                 try:
-                    outputs = list(llm.generate(batch_inputs, sampling_params=sampling_params))
-                except Exception as err:
-                    if is_mm_cache_assertion(err):
+                    retry_outputs = list(llm.generate(retry_inputs, sampling_params=sampling_params))
+                except Exception as retry_err:
+                    err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
+                    if is_mm_cache_assertion(retry_err):
                         print(
-                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
-                            "该 batch 将被跳过并重建引擎后继续。"
+                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
+                            f"{attempt_idx}/{max_prediction_attempts} 次触发 mm_hash 断言，"
+                            "将重建引擎后继续。"
                         )
-                        for sample_idx_in_batch, (item, _, _, _) in enumerate(batch_samples):
-                            record_dropped_item(
-                                item=item,
-                                reason="mm_cache_assertion_inference",
-                                stage="inference",
-                                batch_idx=batch_idx + 1,
-                                sample_idx_in_batch=sample_idx_in_batch,
-                                error=err,
-                            )
-                        flush_and_sync(dropped_f)
+                        err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
                         try:
                             del llm
                             llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
                         except Exception:
                             raise
-                        continue
-                    raise
+                    else:
+                        print(
+                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
+                            f"{attempt_idx}/{max_prediction_attempts} 次失败: "
+                            f"{type(retry_err).__name__}: {retry_err}"
+                        )
 
-                sample_states: List[Dict[str, Any]] = []
-                for sample_idx_in_batch, (item, raw_input, normalized, sample_input) in enumerate(batch_samples):
-                    generated_text = ""
-                    if sample_idx_in_batch < len(outputs):
-                        output = outputs[sample_idx_in_batch]
-                        if output is not None and getattr(output, "outputs", None):
-                            generated_text = output.outputs[0].text or ""
-                    sample_states.append(
-                        {
-                            "item": item,
-                            "raw_input": raw_input,
-                            "normalized": normalized,
-                            "sample_input": sample_input,
-                            "generated_text": generated_text,
-                            "attempts_used": 1,
-                            "retry_errors": [],
-                        }
-                    )
-
-                pending_indices = [
-                    idx
-                    for idx, state in enumerate(sample_states)
-                    if parse_prediction_list(state["generated_text"]) is None
-                ]
-                if pending_indices:
-                    print(
-                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 首轮后有 "
-                        f"{len(pending_indices)}/{len(sample_states)} 条 prediction=null，"
-                        f"将按批重试（最多 {max_prediction_retries} 轮）。"
-                    )
-
-                for attempt_idx in range(2, max_prediction_attempts + 1):
-                    if not pending_indices:
-                        break
-
-                    retry_inputs = [sample_states[idx]["sample_input"] for idx in pending_indices]
                     for idx in pending_indices:
-                        sample_states[idx]["attempts_used"] = attempt_idx
+                        sample_states[idx]["retry_errors"].append(err_msg)
+                    continue
 
-                    try:
-                        retry_outputs = list(llm.generate(retry_inputs, sampling_params=sampling_params))
-                    except Exception as retry_err:
-                        err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
-                        if is_mm_cache_assertion(retry_err):
-                            print(
-                                f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
-                                f"{attempt_idx}/{max_prediction_attempts} 次触发 mm_hash 断言，"
-                                "将重建引擎后继续。"
-                            )
-                            err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
-                            try:
-                                del llm
-                                llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
-                            except Exception:
-                                raise
-                        else:
-                            print(
-                                f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
-                                f"{attempt_idx}/{max_prediction_attempts} 次失败: "
-                                f"{type(retry_err).__name__}: {retry_err}"
-                            )
+                next_pending_indices: List[int] = []
+                for output_idx, sample_idx in enumerate(pending_indices):
+                    generated_text = ""
+                    if output_idx < len(retry_outputs):
+                        retry_output = retry_outputs[output_idx]
+                        if retry_output is not None and getattr(retry_output, "outputs", None):
+                            generated_text = retry_output.outputs[0].text or ""
+                    sample_states[sample_idx]["generated_text"] = generated_text
 
-                        for idx in pending_indices:
-                            sample_states[idx]["retry_errors"].append(err_msg)
-                        continue
+                    if parse_prediction_list(generated_text) is None:
+                        next_pending_indices.append(sample_idx)
 
-                    next_pending_indices: List[int] = []
-                    for output_idx, sample_idx in enumerate(pending_indices):
-                        generated_text = ""
-                        if output_idx < len(retry_outputs):
-                            retry_output = retry_outputs[output_idx]
-                            if retry_output is not None and getattr(retry_output, "outputs", None):
-                                generated_text = retry_output.outputs[0].text or ""
-                        sample_states[sample_idx]["generated_text"] = generated_text
+                pending_indices = next_pending_indices
 
-                        if parse_prediction_list(generated_text) is None:
-                            next_pending_indices.append(sample_idx)
-
-                    pending_indices = next_pending_indices
-
-                for state in sample_states:
-                    record_result(
-                        state["generated_text"],
-                        state["item"],
-                        state["raw_input"],
-                        state["normalized"],
-                        attempts_used=int(state["attempts_used"]),
-                        retry_errors=list(state["retry_errors"]),
-                    )
-
-                flush_and_sync(out_f, dropped_f)
-                print(
-                    f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                    f"已处理 {end}/{len(valid_samples)} 条通过预检样本"
+            for state in sample_states:
+                record_result(
+                    state["generated_text"],
+                    state["item"],
+                    state["raw_input"],
+                    state["normalized"],
+                    attempts_used=int(state["attempts_used"]),
+                    retry_errors=list(state["retry_errors"]),
                 )
-        else:
-            print("[Stage-2] 本次无新增通过预检样本，跳过推理。")
+
+            flush_and_sync(out_f)
+            print(
+                f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
+                f"累计处理 {end}/{len(pending_items)}，累计跳过 {dropped_total} 条"
+            )
 
     if evaluated_total <= 0:
-        raise ValueError("No valid sample left after dropping bad samples")
+        raise ValueError("No valid sample left after inference")
     exact_acc = exact_correct / evaluated_total
     partial_acc = partial_score_sum / evaluated_total
     print(
@@ -1051,8 +922,6 @@ def evaluate_vllm(
         "exact_accuracy": exact_acc,
         "partial_accuracy": partial_acc,
         "dropped_samples": dropped_total,
-        "removed_from_benchmark_file": removed_from_benchmark_file,
-        "dropped_log_file": dropped_log_file,
         "output_file": output_file,
         "resumed": resumed,
     }
@@ -1096,18 +965,6 @@ def main() -> None:
         action="store_false",
         help="显式开启 vLLM 多模态预处理缓存（仅在你确认当前版本稳定时使用）。",
     )
-    parser.add_argument(
-        "--remove_bad_samples_from_benchmark",
-        action="store_true",
-        default=True,
-        help="默认开启：预检失败样本会从 benchmark_file 中直接删除。",
-    )
-    parser.add_argument(
-        "--keep_bad_samples_in_benchmark",
-        dest="remove_bad_samples_from_benchmark",
-        action="store_false",
-        help="不改写 benchmark_file，仅在当前运行中跳过坏样本。",
-    )
 
     args = parser.parse_args()
     random.seed(42)
@@ -1127,7 +984,6 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         data_parallel_size=args.data_parallel_size,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-        remove_bad_samples_from_benchmark=args.remove_bad_samples_from_benchmark,
     )
 
     summary_path = args.output_file + ".summary.json"

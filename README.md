@@ -2,11 +2,17 @@
 
 This repository contains the evaluation code for **COHERENCE**.
 
-## Links
-
-- Dataset: https://huggingface.co/datasets/BingliW/COHERENCE
-- ArXiv: (coming soon)
-- Evaluation Code: this repository
+<p align="center">
+  <a href="https://huggingface.co/datasets/BingliW/COHERENCE">
+    <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-COHERENCE-fcc624?style=for-the-badge&logo=huggingface&logoColor=black" alt="Hugging Face Dataset">
+  </a>
+  <a href="#">
+    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Paper-Coming%20Soon-4c78ff?style=for-the-badge" alt="Paper Coming Soon">
+  </a>
+  <a href=".">
+    <img src="https://img.shields.io/badge/%F0%9F%90%99%20GitHub-Evaluation%20Code-181717?style=for-the-badge&logo=github" alt="GitHub Evaluation Code">
+  </a>
+</p>
 
 ## Introduction
 
@@ -16,71 +22,24 @@ In addition, models must integrate evidence across paragraphs and modalities for
 
 To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in long interleaved multimodal context. COHERENCE covers four representative domains and contains **7,670** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
 
-## Main Results
+## Results Snapshot
 
-`Exact` means exact-match accuracy. `Partial` means Kendall-based partial score.
+To keep this README clean, we provide concise highlights instead of large tables.
+(`Exact` = exact-match accuracy, `Partial/Kendall` = Kendall-based partial score.)
 
-### Open-Source Models
+### Main Results (Domain-Level)
 
-| Model | WikiHow Exact | WikiHow Partial | StoryBird Exact | StoryBird Partial | Cooking Exact | Cooking Partial | Science Exact | Science Partial | Overall Exact | Overall Partial |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Qwen3 VL 4B | 58.45 | 86.35 | 20.54 | 66.82 | 25.28 | 73.18 | 15.93 | 68.92 | 30.86 | 74.26 |
-| Qwen3 VL 8B | 57.29 | 86.05 | 22.12 | 68.90 | 29.53 | 74.99 | 16.44 | 71.27 | 32.10 | 75.70 |
-| Qwen3 VL 30B | 62.48 | 87.95 | 25.18 | 72.08 | 49.33 | 81.18 | 31.71 | 76.66 | 43.05 | 79.85 |
-| Qwen3 VL 235B | 64.25 | 88.67 | 29.11 | 74.07 | 45.80 | 80.78 | 31.40 | 77.64 | 43.44 | 80.63 |
-| Step3-VL 10B | 57.29 | 84.99 | 23.18 | 69.56 | 42.23 | 76.95 | 25.15 | 71.11 | 37.74 | 76.01 |
-| GLM4.6V | 62.76 | 88.09 | 26.53 | 72.37 | 38.86 | 78.76 | 27.61 | 75.88 | 39.75 | 79.14 |
-| Intern-S1-Pro | 64.06 | 88.77 | 26.47 | 72.31 | 52.12 | 81.58 | 33.81 | 77.08 | 45.01 | 80.33 |
-| Kimi K2.5 | 75.43 | 93.23 | 41.84 | 81.14 | 57.31 | 82.92 | 50.15 | 84.00 | 56.98 | 85.60 |
-| Qwen3.5 4B | 62.57 | 88.64 | 32.45 | 76.55 | 41.71 | 77.90 | 29.56 | 76.11 | 42.23 | 80.06 |
-| Qwen3.5 35B-A3 | 69.53 | 90.71 | 42.96 | 81.00 | 53.01 | 81.73 | 41.29 | 81.66 | 52.28 | 83.99 |
-| Qwen3.5 122B-A10 | 71.69 | 91.95 | 44.72 | 82.00 | 61.55 | 84.31 | 47.64 | 83.47 | 57.03 | 85.66 |
-| Qwen3.5 397B-A17 | 69.63 | 91.16 | 49.53 | 83.84 | 69.79 | 87.44 | 57.99 | 86.51 | 62.24 | 87.41 |
+- Best open-source overall model: `Qwen3.5 397B-A17` with `62.24 Exact / 87.41 Partial`.
+- Best closed-source overall model: `Gemini-3.1-pro-preview-thinking` with `69.09 Exact / 89.64 Partial`.
+- Strong closed-source runner-up: `GPT-5.4-high` with `67.25 Exact / 89.05 Partial`.
+- Domain bests (closed-source): `Gemini-3.1-pro-preview-thinking` leads on `WikiHow` and `StoryBird`, while `GPT-5.4-high` leads on `Cooking` and `Science`.
 
-### Closed-Source Models
+### Difficulty Results
 
-| Model | WikiHow Exact | WikiHow Partial | StoryBird Exact | StoryBird Partial | Cooking Exact | Cooking Partial | Science Exact | Science Partial | Overall Exact | Overall Partial |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| doubao-seed-2-0-mini-260215 | 70.59 | 91.65 | 34.33 | 77.33 | 42.54 | 78.33 | 34.99 | 79.04 | 46.41 | 81.90 |
-| doubao-seed-2-0-lite-260215 | 72.50 | 92.31 | 39.85 | 80.50 | 49.43 | 79.31 | 43.85 | 81.30 | 52.15 | 83.61 |
-| doubao-seed-2-0-pro-260215 | 76.34 | 93.62 | 46.65 | 81.25 | 60.78 | 83.16 | 47.13 | 81.96 | 58.40 | 85.27 |
-| Claude-sonnet-4-6-thinking | 73.90 | 92.67 | 47.71 | 83.35 | 69.90 | 87.26 | 56.51 | 85.95 | 62.65 | 87.53 |
-| GPT-5.2-none | 68.28 | 90.05 | 33.63 | 75.75 | 53.21 | 83.14 | 39.45 | 80.24 | 49.45 | 82.64 |
-| GPT-5.4-high | 77.26 | 93.78 | 51.59 | 84.68 | 77.41 | 90.47 | 66.65 | 89.44 | 67.25 | 89.05 |
-| Gemini-3.1-pro-preview-thinking | 80.52 | 94.69 | 56.87 | 86.57 | 72.23 | 88.61 | 64.45 | 87.93 | 69.09 | 89.64 |
-
-## Difficulty Results
-
-`Exact` means exact-match accuracy. `Kendall` means Kendall-based partial score.
-
-### Open-Source Models
-
-| Model | Easy Exact | Easy Kendall | Medium Exact | Medium Kendall | Hard Exact | Hard Kendall | Overall Exact | Overall Kendall |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Qwen3 VL 4B | 42.08 | 75.49 | 18.86 | 74.40 | 2.82 | 64.20 | 30.86 | 74.26 |
-| Qwen3 VL 8B | 42.33 | 76.02 | 21.49 | 76.12 | 4.93 | 71.14 | 32.10 | 75.70 |
-| Qwen3 VL 30B | 54.52 | 80.94 | 31.86 | 79.31 | 9.15 | 74.03 | 43.05 | 79.85 |
-| Qwen3 VL 235B | 54.32 | 81.19 | 33.10 | 80.58 | 10.04 | 76.56 | 43.44 | 80.63 |
-| Step3-VL 10B | 50.30 | 77.80 | 25.09 | 75.31 | 2.64 | 65.61 | 37.74 | 76.01 |
-| GLM4.6V | 50.60 | 79.34 | 28.95 | 79.44 | 8.80 | 76.21 | 39.75 | 79.14 |
-| Intern-S1-Pro | 57.02 | 81.88 | 33.94 | 79.76 | 6.34 | 71.25 | 45.01 | 80.33 |
-| Kimi K2.5 | 66.64 | 86.33 | 48.80 | 85.22 | 22.36 | 81.84 | 56.98 | 85.60 |
-| Qwen3.5 4B | 52.85 | 80.81 | 31.90 | 79.83 | 10.74 | 75.42 | 42.23 | 80.06 |
-| Qwen3.5 35B-A3 | 62.53 | 84.72 | 43.04 | 83.67 | 18.31 | 79.97 | 52.28 | 83.99 |
-| Qwen3.5 122B-A10 | 67.77 | 86.76 | 48.03 | 85.01 | 18.13 | 80.38 | 57.03 | 85.66 |
-| Qwen3.5 397B-A17 | 70.96 | 88.26 | 55.46 | 87.12 | 28.17 | 82.37 | 62.24 | 87.41 |
-
-### Closed-Source Models
-
-| Model | Easy Exact | Easy Kendall | Medium Exact | Medium Kendall | Hard Exact | Hard Kendall | Overall Exact | Overall Kendall |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| doubao-seed-2-0-mini-260215 | 57.60 | 82.62 | 35.83 | 81.58 | 11.80 | 78.01 | 46.41 | 81.90 |
-| doubao-seed-2-0-lite-260215 | 62.74 | 84.60 | 42.53 | 82.88 | 17.43 | 79.60 | 52.15 | 83.61 |
-| doubao-seed-2-0-pro-260215 | 69.05 | 86.93 | 48.91 | 84.22 | 22.54 | 77.62 | 58.40 | 85.27 |
-| Claude-sonnet-4-6-thinking | 73.30 | 88.88 | 53.75 | 86.47 | 23.94 | 82.27 | 62.65 | 87.53 |
-| GPT-5.2-none | 61.27 | 84.18 | 38.24 | 81.49 | 13.03 | 76.33 | 49.45 | 82.64 |
-| GPT-5.4-high | 75.06 | 90.82 | 54.06 | 86.74 | 24.45 | 80.87 | 62.88 | 88.44 |
-| Gemini-3.1-pro-preview-thinking | 80.39 | 92.08 | 59.76 | 87.60 | 27.46 | 80.77 | 69.09 | 89.64 |
+- Best open-source overall by difficulty: `Qwen3.5 397B-A17` with `62.24 Exact / 87.41 Kendall`.
+- Best closed-source overall by difficulty: `Gemini-3.1-pro-preview-thinking` with `69.09 Exact / 89.64 Kendall`.
+- Hard split remains challenging across all families; best hard exact scores are around `27-28%`.
+- COHERENCE still shows a clear gap between Easy/Medium and Hard settings, indicating room for progress in long-context fine-grained alignment.
 
 ## Repository Structure
 

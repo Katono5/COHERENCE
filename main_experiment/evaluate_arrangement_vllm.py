@@ -20,8 +20,8 @@ try:
 except Exception:
     process_vision_info = None
 
-# 图片根目录
-IMAGES_ROOT = "YOUR PATH HERE"
+# Image root directory
+IMAGES_ROOT = "IMAGE PATH HERE"
 PLACEHOLDER = "[IMAGE_PLACEHOLDER]"
 
 
@@ -30,7 +30,7 @@ def is_mm_cache_assertion(err: BaseException) -> bool:
 
 
 def make_item_key(item: Dict[str, Any]) -> str:
-    """优先按 data_id 去重，缺失时回退到组合键。"""
+    """Prefer deduplication by data_id; fall back to a composite key when missing."""
     data_id = str(item.get("data_id", "")).strip()
     if data_id:
         return f"data_id:{data_id}"
@@ -89,7 +89,7 @@ def load_existing_eval_results(output_file: str) -> Dict[str, Any]:
                 continue
 
             key = make_item_key(record)
-            # 同一 key 多次写入时，使用最后一条作为最终结果。
+            # When the same key appears multiple times, keep the last record as final.
             latest_records[key] = record
 
     count = len(latest_records)
@@ -132,7 +132,7 @@ def load_existing_eval_results(output_file: str) -> Dict[str, Any]:
 
 
 def prepare_output_file_for_resume(output_file: str) -> Dict[str, int]:
-    """清理历史结果，仅保留每个 key 的最新记录；latest=null 的样本会被重排队。"""
+    """Compact historical results and keep only the latest record per key; requeue latest=null cases."""
     if not os.path.exists(output_file):
         return {"requeued_count": 0, "kept_count": 0}
 
@@ -330,14 +330,14 @@ def validate_glm_runtime_compat(model_path: str, processor: Any) -> None:
     has_image_processor = hasattr(processor, "image_processor")
     if major is not None and major < 5 and not has_image_processor:
         raise RuntimeError(
-            "检测到 GLM 模型但当前 transformers 版本不满足多模态处理需求："
-            f"当前={TRANSFORMERS_VERSION}。请升级到 transformers>=5.0.0rc0 "
-            "后再运行 evaluate_arrangement_vllm.py。"
+            "Detected a GLM model, but the current transformers version does not satisfy multimodal requirements: "
+            f"current={TRANSFORMERS_VERSION}. Please upgrade to transformers>=5.0.0rc0 "
+            "before running evaluate_arrangement_vllm.py."
         )
 
 
 def build_llm_with_kwarg_compat(llm_cls: Any, llm_kwargs: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
-    """兼容不同 vLLM 版本：遇到不支持的 kwarg 自动移除后重试。"""
+    """Handle vLLM kwarg compatibility by removing unsupported kwargs and retrying."""
     resolved_kwargs = dict(llm_kwargs)
     while True:
         try:
@@ -350,12 +350,12 @@ def build_llm_with_kwarg_compat(llm_cls: Any, llm_kwargs: Dict[str, Any]) -> Tup
             kwarg_name = match.group(1)
             if kwarg_name not in resolved_kwargs:
                 raise
-            print(f"检测到当前 vLLM 版本不支持 `{kwarg_name}`，已自动忽略并重试。")
+            print(f"Current vLLM version does not support `{kwarg_name}`; removed automatically and retrying.")
             resolved_kwargs.pop(kwarg_name, None)
 
 
 def _extract_from_content_list(content_list: Any) -> Tuple[str, List[Dict[str, Any]]]:
-    """从 interleaved content 列表中构造文本与图片序列。"""
+    """Build text and image sequences from an interleaved content list."""
     content_parts: List[str] = []
     image_sequence: List[Dict[str, Any]] = []
 
@@ -379,7 +379,7 @@ def _extract_from_content_list(content_list: Any) -> Tuple[str, List[Dict[str, A
 
 
 def normalize_item_for_vllm(item: Dict[str, Any]) -> Dict[str, Any]:
-    """将不同格式的 item 统一为 content(str) + image_sequence(list) 形式。"""
+    """Normalize item formats to content(str) + image_sequence(list)."""
     content = item["content"]
     if not isinstance(content, list):
         raise TypeError("content must be a list")
@@ -414,7 +414,7 @@ def load_benchmark(file_path: str) -> List[Dict[str, Any]]:
                 items.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    print(f"从 {file_path} 加载 {len(items)} 条样本")
+    print(f"Loaded {len(items)} samples from {file_path}")
     return items
 
 
@@ -431,7 +431,7 @@ def flush_and_sync(*files: Any) -> None:
 
 
 def build_prompt_part1(item: Dict[str, Any]) -> str:
-    """构建 prompt 的第一部分：任务说明 + 文章内容"""
+    """Build prompt part 1: task instruction + article content."""
     content = item["content"]
     image_sequence = item["image_sequence"]
     title = item["title"]
@@ -452,7 +452,7 @@ Your task is to determine which image should be placed at each placeholder posit
 
 
 def build_prompt_part2(item: Dict[str, Any]) -> str:
-    """PROMPT 3 Part 2: 详细版本 - 指令说明"""
+    """PROMPT 3 Part 2: detailed instruction section."""
     image_sequence = item["image_sequence"]
     num_placeholders = item["num_placeholders"]
 
@@ -521,15 +521,15 @@ def build_messages_for_vllm(
     item: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     """
-    为 vLLM 构建 messages：text -> images -> text 格式。
-    
-    消息顺序：
-    1. Text: prompt_part1 (任务说明 + 文章内容)
-    2. Images: 所有候选图片 (Image 0, Image 1, ...)
-    3. Text: prompt_part2 (指令说明)
-    
+    Build vLLM messages in text -> images -> text order.
+
+    Message sequence:
+    1. Text: prompt_part1 (task instruction + article content)
+    2. Images: all candidate images (Image 0, Image 1, ...)
+    3. Text: prompt_part2 (instruction details)
+
     Args:
-        item: benchmark 数据项
+        item: benchmark sample item
     """
     normalized = normalize_item_for_vllm(item)
     raw_input = build_raw_input(normalized)
@@ -540,10 +540,10 @@ def build_messages_for_vllm(
     content: List[Dict[str, Any]] = []
     content.append({"type": "text", "text": prompt_part1})
 
-    # 添加所有图片（带标签）
+    # Add all images with explicit labels.
     for idx, full_path in enumerate(image_paths):
         content.append({"type": "text", "text": f"Image {idx}:"})
-        # 同时提供 image/url 字段，兼容不同模型的 chat_template 约定。
+        # Provide both image/url fields for broader chat_template compatibility.
         content.append({"type": "image", "image": full_path, "url": full_path})
 
     content.append({"type": "text", "text": prompt_part2})
@@ -556,10 +556,10 @@ def prepare_inputs_for_vllm(
     model_path: str,
 ) -> Dict[str, Any]:
     """
-    准备 vLLM 输入：
-    - Qwen 优先尝试 qwen_vl_utils（保留现有稳定路径）
-    - 其他模型（如 GLM）默认走通用路径
-    - 任一路径失败会自动回退
+    Prepare vLLM input with fallback strategy:
+    - Prefer qwen_vl_utils for Qwen (keeps the known stable path)
+    - Use the generic path by default for other models (e.g., GLM)
+    - Automatically fall back when any path fails
     """
     errors: List[str] = []
 
@@ -588,31 +588,19 @@ def evaluate_vllm(
     model_path: str,
     benchmark_items: List[Dict[str, Any]],
     output_file: str,
-    benchmark_file: Optional[str] = None,
     max_tokens: int = 512,
     temperature: float = 0.0,
     top_p: float = 1.0,
     max_model_len: int = 16384,
     batch_size: int = 8,
     tensor_parallel_size: int = 1,
-    data_parallel_size: int = 1,
     disable_mm_preprocessor_cache: bool = True,
     max_prediction_retries: int = 10,
 ) -> Dict[str, Any]:
-    """单个 benchmark 文件的 vLLM 评测（按 batch 直接推理，不做预检）。"""
+    """Run vLLM evaluation for a single benchmark file (batched inference without pre-check)."""
     from vllm import LLM, SamplingParams
 
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    if data_parallel_size <= 0:
-        raise ValueError("data_parallel_size must be >= 1")
-    requested_data_parallel_size = data_parallel_size
-    effective_data_parallel_size = 1
-    if requested_data_parallel_size != 1:
-        print(
-            "检测到 --data_parallel_size="
-            f"{requested_data_parallel_size}，当前脚本为纯 vLLM 单副本模式，"
-            "该参数将被忽略并固定使用 1。"
-        )
 
     base_llm_kwargs = {
         "model": model_path,
@@ -623,10 +611,10 @@ def evaluate_vllm(
         raise ValueError("tensor_parallel_size must be >= 1")
     base_llm_kwargs["tensor_parallel_size"] = tensor_parallel_size
     if disable_mm_preprocessor_cache:
-        # 兼容新旧参数：新版本推荐 mm_processor_cache_gb=0，旧版本保留 disable 开关。
+        # Keep compatibility across versions: newer vLLM uses mm_processor_cache_gb=0; older versions use disable flag.
         base_llm_kwargs["mm_processor_cache_gb"] = 0
         base_llm_kwargs["disable_mm_preprocessor_cache"] = True
-        print("稳定性模式：已默认关闭 vLLM 多模态预处理缓存（规避 mm_hash 断言）。")
+        print("Stability mode: disabled vLLM multimodal preprocessor cache by default (to avoid mm_hash assertion).")
 
     processor = load_processor_with_compat(model_path)
     validate_glm_runtime_compat(model_path, processor)
@@ -659,38 +647,35 @@ def evaluate_vllm(
 
     if requeued_count > 0:
         print(
-            f"检测到 {requeued_count} 条样本的最新结果为 prediction=null，"
-            f"已从 {output_file} 中移除并重新加入待处理队列。"
+            f"Detected {requeued_count} samples whose latest result is prediction=null; "
+            f"removed from {output_file} and requeued."
         )
     if duplicate_pending_count > 0:
         print(
-            f"检测到待处理样本中存在 {duplicate_pending_count} 条重复 data_id，"
-            "已自动去重，仅保留首次出现的记录。"
+            f"Detected {duplicate_pending_count} duplicate data_id entries in pending samples; "
+            "deduplicated automatically and kept the first occurrence only."
         )
 
     if resumed:
         print(
-            f"检测到已有结果：已评测 {evaluated_total}/{total} 条，"
-            f"历史 prediction=null {null_prediction_count} 条"
-            f"（将自动重跑），本次剩余 {len(pending_items)} 条。"
+            f"Detected existing results: {evaluated_total}/{total} already evaluated, "
+            f"historical prediction=null count={null_prediction_count} "
+            f"(will be rerun automatically), remaining this run={len(pending_items)}."
         )
 
     if not pending_items:
         if evaluated_total <= 0:
-            raise ValueError("没有待处理样本，且历史结果为空。")
+            raise ValueError("No pending samples and historical results are empty.")
         exact_acc = exact_correct / evaluated_total
         partial_acc = partial_score_sum / evaluated_total
         print(
-            f"无需继续推理。有效样本 {evaluated_total}，"
-            f"exact_acc={exact_acc:.4f}，partial_acc={partial_acc:.4f}"
+            f"No further inference needed. Valid samples={evaluated_total}, "
+            f"exact_acc={exact_acc:.4f}, partial_acc={partial_acc:.4f}"
         )
         return {
             "mode": "vllm",
             "model_path": model_path,
             "tensor_parallel_size": tensor_parallel_size,
-            "requested_data_parallel_size": requested_data_parallel_size,
-            "effective_data_parallel_size": effective_data_parallel_size,
-            "data_parallel_size": effective_data_parallel_size,
             "total": evaluated_total,
             "original_total": total,
             "exact_correct": int(exact_correct),
@@ -751,7 +736,7 @@ def evaluate_vllm(
             }
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        print(f"[Stage-2] 开始推理，本次待处理 {len(pending_items)} 条（总样本 {total}）。")
+        print(f"[Stage-2] Inference started. Pending this run: {len(pending_items)} (total samples: {total}).")
         llm, resolved_llm_kwargs = build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
 
         num_batches = (len(pending_items) + batch_size - 1) // batch_size
@@ -772,15 +757,15 @@ def evaluate_vllm(
                         "bad_image_inference" if is_bad_image_error(build_err) else "input_prepare_exception"
                     )
                     print(
-                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 构建输入失败并跳过 1 条："
+                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} input build failed; skipped 1 sample: "
                         f"reason={reason}, data_id={item.get('data_id')}, "
                         f"error={type(build_err).__name__}: {build_err}"
                     )
 
             if not batch_samples:
                 print(
-                    f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                    f"该 batch 无可推理样本（累计跳过 {dropped_total} 条）"
+                    f"[Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
+                    f"no inferable samples in this batch (total skipped: {dropped_total})"
                 )
                 continue
 
@@ -791,8 +776,8 @@ def evaluate_vllm(
                 if is_mm_cache_assertion(err):
                     dropped_total += len(batch_samples)
                     print(
-                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
-                        f"跳过该 batch {len(batch_samples)} 条并重建引擎后继续。"
+                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} hit mm_hash assertion, "
+                        f"skipping this batch ({len(batch_samples)} samples), rebuilding engine, then continuing."
                     )
                     try:
                         del llm
@@ -828,9 +813,9 @@ def evaluate_vllm(
             ]
             if pending_indices:
                 print(
-                    f"[Stage-2] batch {batch_idx + 1}/{num_batches} 首轮后有 "
-                    f"{len(pending_indices)}/{len(sample_states)} 条 prediction=null，"
-                    f"将按批重试（最多 {max_prediction_retries} 轮）。"
+                    f"[Stage-2] batch {batch_idx + 1}/{num_batches} after first pass has "
+                    f"{len(pending_indices)}/{len(sample_states)} prediction=null samples; "
+                    f"batch retries will run (max {max_prediction_retries} rounds)."
                 )
 
             for attempt_idx in range(2, max_prediction_attempts + 1):
@@ -847,9 +832,9 @@ def evaluate_vllm(
                     err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
                     if is_mm_cache_assertion(retry_err):
                         print(
-                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
-                            f"{attempt_idx}/{max_prediction_attempts} 次触发 mm_hash 断言，"
-                            "将重建引擎后继续。"
+                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} batch retry "
+                            f"{attempt_idx}/{max_prediction_attempts} hit mm_hash assertion; "
+                            "rebuilding engine before continuing."
                         )
                         err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
                         try:
@@ -859,8 +844,8 @@ def evaluate_vllm(
                             raise
                     else:
                         print(
-                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
-                            f"{attempt_idx}/{max_prediction_attempts} 次失败: "
+                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} batch retry "
+                            f"{attempt_idx}/{max_prediction_attempts} failed: "
                             f"{type(retry_err).__name__}: {retry_err}"
                         )
 
@@ -894,8 +879,8 @@ def evaluate_vllm(
 
             flush_and_sync(out_f)
             print(
-                f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                f"累计处理 {end}/{len(pending_items)}，累计跳过 {dropped_total} 条"
+                f"[Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
+                f"processed {end}/{len(pending_items)} in total, skipped {dropped_total} in total"
             )
 
     if evaluated_total <= 0:
@@ -903,9 +888,9 @@ def evaluate_vllm(
     exact_acc = exact_correct / evaluated_total
     partial_acc = partial_score_sum / evaluated_total
     print(
-        f"vLLM 评测完成，原始样本 {total}，有效样本 {evaluated_total}，"
-        f"跳过样本 {dropped_total}，"
-        f"exact_match 正确 {int(exact_correct)}，exact_acc={exact_acc:.4f}，"
+        f"vLLM evaluation finished. Original samples={total}, valid samples={evaluated_total}, "
+        f"skipped samples={dropped_total}, "
+        f"exact_match correct={int(exact_correct)}, exact_acc={exact_acc:.4f}, "
         f"partial_acc={partial_acc:.4f}"
     )
 
@@ -913,9 +898,6 @@ def evaluate_vllm(
         "mode": "vllm",
         "model_path": model_path,
         "tensor_parallel_size": tensor_parallel_size,
-        "requested_data_parallel_size": requested_data_parallel_size,
-        "effective_data_parallel_size": effective_data_parallel_size,
-        "data_parallel_size": effective_data_parallel_size,
         "total": evaluated_total,
         "original_total": total,
         "exact_correct": int(exact_correct),
@@ -928,10 +910,10 @@ def evaluate_vllm(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Interleaved-Image-Text Matching vLLM 评测脚本")
-    parser.add_argument("--model_path", type=str, required=True, help="vLLM 模型路径")
-    parser.add_argument("--benchmark_file", type=str, required=True, help="benchmark jsonl 文件路径")
-    parser.add_argument("--output_file", type=str, required=True, help="结果输出 jsonl 路径")
+    parser = argparse.ArgumentParser(description="Interleaved-Image-Text Matching vLLM evaluation script")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to vLLM model")
+    parser.add_argument("--benchmark_file", type=str, required=True, help="Path to benchmark jsonl file")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to output result jsonl")
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -941,29 +923,23 @@ def main() -> None:
         "--max_prediction_retries",
         type=int,
         default=10,
-        help="当 prediction 解析为 None 时，最多重试推理次数（不含首轮）",
+        help="Maximum retry rounds when prediction parses as None (excluding the first attempt)",
     )
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
-    parser.add_argument(
-        "--data_parallel_size",
-        type=int,
-        default=1,
-        help="兼容参数（已弃用）：纯 vLLM 模式固定单副本，不再启用 data parallel。",
-    )
     parser.add_argument(
         "--disable_mm_preprocessor_cache",
         action="store_true",
         default=True,
         help=(
-            "默认开启：关闭 vLLM 多模态预处理缓存，规避 "
-            "`Expected a cached item for mm_hash` 断言错误。"
+            "Enabled by default: disable vLLM multimodal preprocessor cache to avoid "
+            "`Expected a cached item for mm_hash` assertion errors."
         ),
     )
     parser.add_argument(
         "--enable_mm_preprocessor_cache",
         dest="disable_mm_preprocessor_cache",
         action="store_false",
-        help="显式开启 vLLM 多模态预处理缓存（仅在你确认当前版本稳定时使用）。",
+        help="Explicitly enable vLLM multimodal preprocessor cache (use only when your version is stable).",
     )
 
     args = parser.parse_args()
@@ -974,7 +950,6 @@ def main() -> None:
         model_path=args.model_path,
         benchmark_items=items,
         output_file=args.output_file,
-        benchmark_file=args.benchmark_file,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -982,14 +957,13 @@ def main() -> None:
         batch_size=args.batch_size,
         max_prediction_retries=args.max_prediction_retries,
         tensor_parallel_size=args.tensor_parallel_size,
-        data_parallel_size=args.data_parallel_size,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     summary_path = args.output_file + ".summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"评测 summary 已保存到: {summary_path}")
+    print(f"Evaluation summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":

@@ -221,42 +221,42 @@ def _resolve_path_with_repo_fallback(path: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "按题目难度统计并输出单表：每个难度同时包含 "
-            "Exact Match Accuracy 和 Kendall Tau（百分制）两列。"
-            "难度由 len(answer) 定义：len<7 为 easy，7-12 为 medium，>12 为 hard。"
+            "Generate a single difficulty-level table: each difficulty includes "
+            "Exact Match Accuracy and Kendall Tau (percentage). "
+            "Difficulty is defined by len(answer): len<7 -> easy, 7-12 -> medium, >12 -> hard."
         )
     )
-    parser.add_argument("--results_dir", type=Path, default=Path("results"), help="结果目录")
+    parser.add_argument("--results_dir", type=Path, default=Path("results"), help="Results directory")
     parser.add_argument(
         "--benchmark_subset_dir",
         type=Path,
-        default=Path("datasets/benchmark_data/full_benchmark_7670"),
-        help="用于过滤统计范围的 benchmark 子集目录（默认 7670）",
+        default=Path("datasets/benchmark_data"),
+        help="Benchmark subset directory used to filter the statistics scope (default: datasets/benchmark_data)",
     )
     parser.add_argument(
         "--sort_by",
         choices=["model", "overall"],
         default="model",
-        help="排序方式（默认按模型名）",
+        help="Sort mode (default: model name)",
     )
-    parser.add_argument("--descending", action="store_true", help="降序")
+    parser.add_argument("--descending", action="store_true", help="Sort in descending order")
     parser.add_argument(
         "--num_workers",
         type=int,
         default=max(1, min(32, (os.cpu_count() or 1) * 2)),
-        help="并行统计线程数",
+        help="Number of worker threads for parallel aggregation",
     )
     parser.add_argument(
         "--output_png",
         type=Path,
         default=Path("results/difficulty_exact_kendall_table.png"),
-        help="Difficulty 合并表图片路径",
+        help="Output path for merged difficulty table image",
     )
     parser.add_argument(
         "--output_tsv",
         type=Path,
         default=None,
-        help="可选：Difficulty 合并表 TSV 路径",
+        help="Optional: output path for merged difficulty table TSV",
     )
     # Backward-compatible aliases from the previous two-table version.
     parser.add_argument("--output_png_exact", type=Path, default=None, help=argparse.SUPPRESS)

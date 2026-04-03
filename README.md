@@ -71,52 +71,78 @@ pip install -U vllm transformers pillow tqdm openai
 pip install -U qwen-vl-utils
 ```
 
-## Required Configuration
+## Step-by-Step Run Guide
 
-Set image root paths in these files:
+Use one of the two routes below:
+
+- Route A: API evaluation (`openai` SDK)
+- Route B: local vLLM evaluation (`vllm`)
+
+### Step 1. Create environment
+
+For API route:
+
+```bash
+python -m venv .venv-api
+source .venv-api/bin/activate
+pip install -U openai transformers pillow tqdm
+```
+
+For vLLM route:
+
+```bash
+python -m venv .venv-vllm
+source .venv-vllm/bin/activate
+pip install -U vllm transformers pillow tqdm
+# Optional for some Qwen-VL setups
+pip install -U qwen-vl-utils
+```
+
+### Step 2. Download dataset
+
+```bash
+pip install -U "huggingface_hub[cli]"
+huggingface-cli download BingliW/COHERENCE \
+  --repo-type dataset \
+  --local-dir datasets
+```
+
+Expected local structure (examples):
+
+- `datasets/images/...`
+- `datasets/benchmark_data/...`
+
+### Step 3. Update paths in scripts
+
+If you have already replaced placeholders with real local paths, you can skip this step.
+
+1. Set image root:
 
 - `main_experiment/evaluate_arrangement_vllm.py`
 - `main_experiment/evaluate_arrangement_api.py`
 - `main_experiment/error_analysis.py`
 
-Replace:
+Set `IMAGES_ROOT` to your local `datasets/images` absolute path.
+Some files may use placeholders like `IMAGES_ROOT = "IMAGE PATH HERE"` or `IMAGES_ROOT = "Your Path Here"`.
 
-```python
-IMAGES_ROOT = "Your Path Here"
-```
+2. Set benchmark path:
 
-with your real absolute image directory.
+- `main_experiment/run_main_api.sh`: edit `BENCH_DIR` and `BENCH_FILES`
+- `main_experiment/run_main_vllm.sh`: edit `BENCH_DIR` and `BENCH_FILES`
 
-Also configure model paths:
+Use the path that matches your downloaded files, for example:
 
-- `main_experiment/run_main_vllm.sh` (`MODEL_PATH`)
-- `ablation_experiment/run_ablation_text_only.sh` (`MODEL_PATH`)
-- `ablation_experiment/run_ablation_image_only.sh` (`MODEL_PATH`)
+- `datasets/benchmark_data/` with files like `cooking.jsonl`, `science.jsonl`, `storybird.jsonl`, `wikihow.jsonl`
 
-## Benchmark Data Layout
+3. Set model path for vLLM:
 
-Default scripts expect benchmark files under:
+- `main_experiment/run_main_vllm.sh` -> `MODEL_PATH`
+- `ablation_experiment/run_ablation_text_only.sh` -> `MODEL_PATH`
+- `ablation_experiment/run_ablation_image_only.sh` -> `MODEL_PATH`
 
-```text
-datasets/benchmark_data/full_benchmark_7670/
-```
+If a script still shows `MODEL_PATH="MODEL PATH HERE"`, replace it with your local model directory.
 
-including:
-
-- `cooking_full.reasonable.jsonl`
-- `science_full.reasonable.jsonl`
-- `storybird_full.reasonable.jsonl`
-- `wikihow_full.reasonable.jsonl`
-
-## Evaluation
-
-### vLLM: run all 4 subsets
-
-```bash
-bash main_experiment/run_main_vllm.sh main_experiment/results
-```
-
-### API: run all 4 subsets
+### Step 4A. Run API evaluation
 
 ```bash
 export API_BASE="https://your-api-base/v1"
@@ -126,21 +152,14 @@ export API_MODEL="your_model_name"
 bash main_experiment/run_main_api.sh main_experiment/results
 ```
 
-### vLLM single-file example
+### Step 4B. Run vLLM evaluation
 
 ```bash
-python main_experiment/evaluate_arrangement_vllm.py \
-  --model_path /path/to/your/model \
-  --benchmark_file datasets/benchmark_data/full_benchmark_7670/cooking_full.reasonable.jsonl \
-  --output_file main_experiment/results/your_model/cooking_full.reasonable_vllm_eval.jsonl \
-  --max_tokens 12000 \
-  --temperature 0.6 \
-  --top_p 1.0 \
-  --max_model_len 40000 \
-  --batch_size 256 \
-  --tensor_parallel_size 1 \
-  --data_parallel_size 1
+# Optional: export TP_SIZE=1 (or another value)
+bash main_experiment/run_main_vllm.sh main_experiment/results
 ```
+
+After running, predictions are written to `main_experiment/results/...` and each jsonl has a matching `.summary.json`.
 
 ## Ablation
 
@@ -161,7 +180,6 @@ bash ablation_experiment/run_ablation_image_only.sh results/ablation_image_only
 For each output jsonl, scripts also write:
 
 - `<output>.summary.json`
-- (vLLM main only) `<output>.dropped.jsonl`
 
 Typical record fields:
 
@@ -180,7 +198,7 @@ python main_experiment/error_analysis.py --help
 ## Notes
 
 - Evaluation supports resume mode if output files already exist.
-- In current scripts, `data_parallel_size` is kept as a compatibility argument and may be forced to `1`.
+- Current vLLM scripts expose `tensor_parallel_size` only.
 - `stats_accuracy_by_domain.py` and `stats_accuracy_by_difficulty.py` import `accuracy_table_common`, which is not included in this snapshot.
 
 ## Citation

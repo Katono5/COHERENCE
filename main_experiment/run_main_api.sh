@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COHERENCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PY_SCRIPT="${SCRIPT_DIR}/evaluate_arrangement_api.py"
-BENCH_DIR="${COHERENCE_ROOT}/datasets/benchmark_data/full_benchmark_7670"
+BENCH_DIR="${COHERENCE_ROOT}/datasets/benchmark_data"
 OUTPUT_ROOT="${1:-${SCRIPT_DIR}/results}"
 
 API_BASE="${API_BASE:-}"
@@ -20,10 +20,10 @@ MAX_PREDICTION_RETRIES="${MAX_PREDICTION_RETRIES:-0}"
 IMAGE_URL_MODE="${IMAGE_URL_MODE:-data_uri}"
 
 BENCH_FILES=(
-  "${BENCH_DIR}/cooking_full.reasonable.jsonl"
-  "${BENCH_DIR}/science_full.reasonable.jsonl"
-  "${BENCH_DIR}/storybird_full.reasonable.jsonl"
-  "${BENCH_DIR}/wikihow_full.reasonable.jsonl"
+  "${BENCH_DIR}/cooking.jsonl"
+  "${BENCH_DIR}/science.jsonl"
+  "${BENCH_DIR}/storybird.jsonl"
+  "${BENCH_DIR}/wikihow.jsonl"
 )
 
 sanitize_name() {
@@ -31,19 +31,19 @@ sanitize_name() {
 }
 
 if [[ ! -f "${PY_SCRIPT}" ]]; then
-  echo "找不到脚本: ${PY_SCRIPT}"
+  echo "Script not found: ${PY_SCRIPT}"
   exit 1
 fi
 
 for bench in "${BENCH_FILES[@]}"; do
   if [[ ! -f "${bench}" ]]; then
-    echo "benchmark 文件不存在: ${bench}"
+    echo "Benchmark file not found: ${bench}"
     exit 1
   fi
 done
 
 if [[ -z "${API_BASE}" || -z "${API_KEY}" || -z "${API_MODEL}" ]]; then
-  echo "API_BASE / API_KEY / API_MODEL 不能为空。"
+  echo "API_BASE / API_KEY / API_MODEL must not be empty."
   exit 1
 fi
 
@@ -79,4 +79,4 @@ for bench in "${BENCH_FILES[@]}"; do
     --image_url_mode "${IMAGE_URL_MODE}"
 done
 
-echo "[DONE] main experiment (api) 全部完成"
+echo "[DONE] main experiment (api) all done"

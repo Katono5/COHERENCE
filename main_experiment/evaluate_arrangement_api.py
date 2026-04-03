@@ -19,7 +19,7 @@ try:
 except ImportError:
     from main_experiment.metrics import kendall_tau_mapped_0_1
 
-# 图片根目录
+# Image root directory
 IMAGES_ROOT = "Your Path Here"
 PLACEHOLDER = "[IMAGE_PLACEHOLDER]"
 
@@ -39,7 +39,7 @@ def ensure_results_dir(path: str) -> None:
 
 
 def make_item_key(item: Dict[str, Any]) -> str:
-    """优先按 data_id 去重，缺失时回退到组合键。"""
+    """Prefer deduplication by data_id; fall back to a composite key when missing."""
     data_id = str(item.get("data_id", "")).strip()
     if data_id:
         return f"data_id:{data_id}"
@@ -98,7 +98,7 @@ def load_existing_results(output_file: str) -> Dict[str, Any]:
                 continue
 
             key = make_item_key(record)
-            # 同一 key 多次写入时，使用最后一条作为最终结果。
+            # When the same key appears multiple times, keep the last record as final.
             latest_records[key] = record
 
     count = len(latest_records)
@@ -141,7 +141,7 @@ def load_existing_results(output_file: str) -> Dict[str, Any]:
 
 
 def prepare_output_file_for_resume(output_file: str) -> Dict[str, int]:
-    """清理历史结果，仅保留每个 key 的最新记录；latest=null 的样本会被重排队。"""
+    """Compact historical results and keep only the latest record per key; requeue latest=null cases."""
     if not os.path.exists(output_file):
         return {"requeued_count": 0, "kept_count": 0}
 
@@ -208,7 +208,7 @@ def collect_pending_items(items: List[Dict[str, Any]], processed_keys: Set[str])
 
 
 def image_to_base64(image_path: str) -> str:
-    """读取图片并编码为 base64。"""
+    """Read an image and encode it in base64."""
     try:
         with Image.open(image_path) as img:
             if img.mode != "RGB":
@@ -218,12 +218,12 @@ def image_to_base64(image_path: str) -> str:
             img_bytes = buffer.getvalue()
         return base64.b64encode(img_bytes).decode("utf-8")
     except Exception as e:
-        print(f"警告: 无法读取图片 {image_path}: {e}")
+        print(f"Warning: failed to read image {image_path}: {e}")
         return ""
 
 
 def _extract_from_content_list(content_list: Any) -> Tuple[str, List[Dict[str, Any]]]:
-    """从 interleaved content 列表中构造文本与图片序列。"""
+    """Build text and image sequences from an interleaved content list."""
     content_parts: List[str] = []
     image_sequence: List[Dict[str, Any]] = []
 
@@ -247,7 +247,7 @@ def _extract_from_content_list(content_list: Any) -> Tuple[str, List[Dict[str, A
 
 
 def normalize_item_for_api(item: Dict[str, Any]) -> Dict[str, Any]:
-    """将不同格式的 item 统一为 content(str) + image_sequence(list) 形式。"""
+    """Normalize item formats to content(str) + image_sequence(list)."""
     content = item["content"]
     if not isinstance(content, list):
         raise TypeError("content must be a list")
@@ -349,7 +349,7 @@ def build_api_content_parts(
     image_paths: List[str],
     image_url_mode: str = "data_uri",
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """构建 API 输入 content：text(part1) -> images -> text(part2)。"""
+    """Build API input content in text(part1) -> images -> text(part2) order."""
     prompt_part1 = build_prompt_part1_v3(item)
     prompt_part2 = build_prompt_part2_v3(item)
 
@@ -376,7 +376,7 @@ _LIST_RE = re.compile(r"\[([0-9,\s]+)\]")
 
 
 def parse_prediction_list(text: str) -> Optional[List[int]]:
-    """解析输出中的最后一个 [0,1,2,...] 列表。"""
+    """Parse the last [0,1,2,...] list from model output."""
     if not text:
         return None
     matches = _LIST_RE.findall(text)
@@ -410,9 +410,9 @@ def evaluate_api(
     image_url_mode: str = "auto",
     max_prediction_retries: int = 10,
 ) -> Dict[str, Any]:
-    """使用 OpenAI-compatible API 评测多模态模型。
-    
-    并发发送请求，每收到一个响应就更新进度条。
+    """Evaluate a multimodal model via an OpenAI-compatible API.
+
+    Requests are sent concurrently, and the progress bar updates on each response.
     """
     from openai import OpenAI
 
@@ -434,7 +434,7 @@ def evaluate_api(
             "messages": messages,
             "temperature": temperature,
         }
-        # 与 vLLM 示例对齐：优先使用 max_completion_tokens；不支持时回退 max_tokens。
+        # Align with the vLLM path: prefer max_completion_tokens, then fall back to max_tokens if unsupported.
         try:
             return client.chat.completions.create(
                 max_completion_tokens=max_tokens,
@@ -492,7 +492,7 @@ def evaluate_api(
 
         return generated_text, reasoning_content
 
-    # 先读取所有样本
+    # Read all samples first.
     items = []
     with open(benchmark_file, "r", encoding="utf-8") as f:
         for line in f:
@@ -520,20 +520,20 @@ def evaluate_api(
 
     if requeued_count > 0:
         print(
-            f"检测到 {requeued_count} 条样本的最新结果为 prediction=null，"
-            f"已从 {output_file} 中移除并重新加入待处理队列。"
+            f"Detected {requeued_count} samples whose latest result is prediction=null; "
+            f"removed from {output_file} and requeued."
         )
     if duplicate_pending_count > 0:
         print(
-            f"检测到待处理样本中存在 {duplicate_pending_count} 条重复 data_id，"
-            "已自动去重，仅保留首次出现的记录。"
+            f"Detected {duplicate_pending_count} duplicate data_id entries in pending samples; "
+            "deduplicated automatically and kept the first occurrence only."
         )
 
     if resumed:
         print(
-            f"检测到已有结果 {output_file}，已完成 {processed_count}/{total} 条，"
-            f"prediction=null {null_prediction_count} 条，"
-            f"将继续处理剩余 {len(pending_items)} 条。"
+            f"Detected existing results in {output_file}: completed {processed_count}/{total}, "
+            f"prediction=null count={null_prediction_count}, "
+            f"continuing with remaining {len(pending_items)} samples."
         )
 
     if not pending_items:
@@ -541,9 +541,9 @@ def evaluate_api(
         partial_acc = partial_score_sum / total if total > 0 else 0.0
         miss_acc = miss_prediction_count / total if total > 0 else 0.0
         print(
-            f"无需继续推理。总样本 {total}，"
-            f"exact_acc={exact_acc:.4f}，partial_acc={partial_acc:.4f}，"
-            f"miss(prediction=null)={miss_prediction_count}，miss_acc={miss_acc:.4f}"
+            f"No further inference needed. Total samples={total}, "
+            f"exact_acc={exact_acc:.4f}, partial_acc={partial_acc:.4f}, "
+            f"miss(prediction=null)={miss_prediction_count}, miss_acc={miss_acc:.4f}"
         )
         return {
             "mode": "api",
@@ -562,12 +562,12 @@ def evaluate_api(
     out_f = open(output_file, "a" if resumed else "w", encoding="utf-8")
     write_lock = threading.Lock()
     print(
-        f"开始 API 评测，总样本 {total}，本次待处理 {len(pending_items)}，"
-        f"model={api_model}，并发数={batch_size}，image_url_mode={image_url_mode}"
+        f"API evaluation started. Total samples={total}, pending this run={len(pending_items)}, "
+        f"model={api_model}, concurrency={batch_size}, image_url_mode={image_url_mode}"
     )
 
     def process_single_item(idx: int, item: Dict[str, Any]) -> Dict[str, Any]:
-        """处理单个样本，返回结果记录"""
+        """Process one sample and return its result record."""
         model_input_for_log: Optional[Dict[str, Any]] = None
 
         try:
@@ -677,7 +677,7 @@ def evaluate_api(
             partial = partial_match(pred_list, answer, num_placeholders)
 
         record = {
-            "idx": idx,  # 用于排序
+            "idx": idx,  # Used for ordered output writing.
             "dataset_type": item.get("dataset_type", ""),
             "data_id": item.get("data_id", ""),
             "url_id": item.get("url_id", ""),
@@ -696,29 +696,29 @@ def evaluate_api(
         }
         return record
 
-    # 用于按顺序写入的缓冲区
+    # Buffer for ordered writes.
     results_buffer = {}
     next_write_idx = 0
     evaluated_count = processed_count
 
     def try_write_ordered():
-        """尝试按顺序写入已完成的结果"""
+        """Write completed results in index order when possible."""
         nonlocal next_write_idx
         while next_write_idx in results_buffer:
             record = results_buffer.pop(next_write_idx)
-            # 移除用于排序的 idx 字段
+            # Remove the internal index field used for ordering.
             record.pop("idx")
-            # 写入文件
+            # Write to file.
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
             out_f.flush()
             next_write_idx += 1
 
-    # 并发处理，每完成一个就更新进度条
+    # Process concurrently and update progress after each completion.
     with ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = {executor.submit(process_single_item, idx, item): idx
                    for idx, item in enumerate(pending_items)}
         
-        with tqdm(total=len(pending_items), desc="API 推理") as pbar:
+        with tqdm(total=len(pending_items), desc="API inference") as pbar:
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
@@ -732,7 +732,7 @@ def evaluate_api(
                         results_buffer[record["idx"]] = record
                         try_write_ordered()
                 except Exception as e:
-                    print(f"处理样本 idx={idx} 时出错: {e}")
+                    print(f"Error while processing sample idx={idx}: {e}")
                 pbar.update(1)
                 current_done = evaluated_count
                 live_exact_acc = exact_correct / current_done if current_done > 0 else 0.0
@@ -750,10 +750,10 @@ def evaluate_api(
     partial_acc = partial_score_sum / total if total > 0 else 0.0
     miss_acc = miss_prediction_count / total if total > 0 else 0.0
     print(
-        f"API 评测完成，总样本 {total}，"
-        f"exact_match 正确 {int(exact_correct)}，exact_acc={exact_acc:.4f}，"
-        f"partial_acc={partial_acc:.4f}，"
-        f"miss(prediction=null)={miss_prediction_count}，miss_acc={miss_acc:.4f}"
+        f"API evaluation finished. Total samples={total}, "
+        f"exact_match correct={int(exact_correct)}, exact_acc={exact_acc:.4f}, "
+        f"partial_acc={partial_acc:.4f}, "
+        f"miss(prediction=null)={miss_prediction_count}, miss_acc={miss_acc:.4f}"
     )
 
     return {
@@ -772,27 +772,27 @@ def evaluate_api(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="category-1-arrangement API 评测脚本")
+    parser = argparse.ArgumentParser(description="category-1-arrangement API evaluation script")
     parser.add_argument("--api_base", type=str, required=True, help="API base_url")
     parser.add_argument("--api_key", type=str, required=True, help="API key")
-    parser.add_argument("--api_model", type=str, required=True, help="API 模型名称")
-    parser.add_argument("--benchmark_file", type=str, required=True, help="benchmark jsonl 文件")
-    parser.add_argument("--output_file", type=str, required=True, help="结果输出 jsonl 路径")
+    parser.add_argument("--api_model", type=str, required=True, help="API model name")
+    parser.add_argument("--benchmark_file", type=str, required=True, help="Path to benchmark jsonl file")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to output result jsonl")
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--batch_size", type=int, default=8, help="并发请求数")
+    parser.add_argument("--batch_size", type=int, default=8, help="Number of concurrent requests")
     parser.add_argument(
         "--max_prediction_retries",
         type=int,
         default=10,
-        help="当 prediction 解析为 None 时，最多重试推理次数（不含首轮）",
+        help="Maximum retry rounds when prediction parses as None (excluding the first attempt)",
     )
     parser.add_argument(
         "--image_url_mode",
         type=str,
         default="auto",
         choices=["auto", "data_uri", "file_url", "local_path"],
-        help="图片 URL 传输模式；auto 会依次尝试 data_uri/file_url/local_path",
+        help="Image URL transport mode; auto tries data_uri/file_url/local_path in order",
     )
 
     args = parser.parse_args()
@@ -814,7 +814,7 @@ def main() -> None:
     summary_path = args.output_file + ".summary.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"评测 summary 已保存到: {summary_path}")
+    print(f"Evaluation summary saved to: {summary_path}")
 
 
 if __name__ == "__main__":

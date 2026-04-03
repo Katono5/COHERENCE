@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""单模态消融排序评测（vLLM 后端）。
+"""Single-modality ablation ranking evaluation (vLLM backend).
 
-支持两种消融模式：
-- text_only: 仅保留文章文本与 [IMAGE_PLACEHOLDER]，不输入任何候选图片。
-- image_only: 仅保留候选图片，不输入文章正文。
+Supported ablation modes:
+- text_only: keep article text and [IMAGE_PLACEHOLDER] only; do not provide candidate images.
+- image_only: keep candidate images only; do not provide article body text.
 
-默认模型为 Qwen3.5-397B，默认并行配置 tp=8。
 """
 
 import argparse
@@ -14,7 +13,7 @@ import json
 import os
 import random
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 COHERENCE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MAIN_EXPERIMENT_DIR = os.path.join(COHERENCE_ROOT, "main_experiment")
@@ -23,11 +22,10 @@ if MAIN_EXPERIMENT_DIR not in sys.path:
 
 import evaluate_arrangement_vllm as base_eval
 
-DEFAULT_QWEN3_5_397B = os.path.join(COHERENCE_ROOT, "models", "Qwen3.5-397B")
 
 
 def build_prompt_text_only(item: Dict[str, Any]) -> str:
-    """文本消融：不提供图片，但避免模型输出“看不到图片”。"""
+    """Text-only ablation: do not provide images while avoiding "cannot see images" responses."""
     content = item["content"]
     num_placeholders = item["num_placeholders"]
     num_images = len(item["image_sequence"])
@@ -66,7 +64,7 @@ Now provide your final answer."""
 
 
 def build_prompt_image_only_part1(item: Dict[str, Any]) -> str:
-    """图片消融：不提供文章正文，仅提供图片并要求排序。"""
+    """Image-only ablation: provide only images and request ranking without article text."""
     num_placeholders = item["num_placeholders"]
     num_images = len(item["image_sequence"])
 
@@ -200,7 +198,6 @@ def evaluate_ablation_vllm(
     max_model_len: int = 16384,
     batch_size: int = 8,
     tensor_parallel_size: int = 8,
-    data_parallel_size: int = 1,
     disable_mm_preprocessor_cache: bool = True,
     max_prediction_retries: int = 10,
 ) -> Dict[str, Any]:
@@ -212,15 +209,6 @@ def evaluate_ablation_vllm(
         raise ValueError("max_prediction_retries must be >= 0")
 
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    if data_parallel_size <= 0:
-        raise ValueError("data_parallel_size must be >= 1")
-    requested_data_parallel_size = data_parallel_size
-    effective_data_parallel_size = 1
-    if requested_data_parallel_size != 1:
-        print(
-            f"[{ablation_mode}] 检测到 --data_parallel_size={requested_data_parallel_size}，"
-            "当前脚本为纯 vLLM 单副本模式，该参数将被忽略并固定使用 1。"
-        )
 
     base_llm_kwargs: Dict[str, Any] = {
         "model": model_path,
@@ -252,7 +240,7 @@ def evaluate_ablation_vllm(
     max_prediction_attempts = max_prediction_retries + 1
 
     with open(output_file, "w", encoding="utf-8") as out_f:
-        print(f"[{ablation_mode}] [Stage-2] 开始推理，总样本 {total} 条")
+        print(f"[{ablation_mode}] [Stage-2] Inference started, total samples: {total}")
         llm, resolved_llm_kwargs = base_eval.build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
 
         num_batches = (len(benchmark_items) + batch_size - 1) // batch_size
@@ -287,15 +275,15 @@ def evaluate_ablation_vllm(
                         else "input_prepare_exception"
                     )
                     print(
-                        f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} 构建输入失败并跳过 1 条："
+                        f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} input build failed; skipped 1 sample: "
                         f"reason={reason}, data_id={item.get('data_id')}, "
                         f"error={type(build_err).__name__}: {build_err}"
                     )
 
             if not batch_samples:
                 print(
-                    f"[{ablation_mode}] [Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                    f"该 batch 无可推理样本（累计跳过 {dropped_total} 条）"
+                    f"[{ablation_mode}] [Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
+                    f"no inferable samples in this batch (total skipped: {dropped_total})"
                 )
                 continue
 
@@ -306,8 +294,8 @@ def evaluate_ablation_vllm(
                 if base_eval.is_mm_cache_assertion(err):
                     dropped_total += len(batch_samples)
                     print(
-                        f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
-                        f"跳过该 batch {len(batch_samples)} 条并重建引擎。"
+                        f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} hit mm_hash assertion, "
+                        f"skipping this batch ({len(batch_samples)} samples) and rebuilding engine."
                     )
                     try:
                         del llm
@@ -345,9 +333,9 @@ def evaluate_ablation_vllm(
 
             if pending_indices:
                 print(
-                    f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} 首轮后 "
-                    f"prediction=null {len(pending_indices)}/{len(sample_states)}，"
-                    f"最多重试 {max_prediction_retries} 轮"
+                    f"[{ablation_mode}] batch {batch_idx + 1}/{num_batches} after first pass: "
+                    f"prediction=null {len(pending_indices)}/{len(sample_states)}, "
+                    f"max retries: {max_prediction_retries}"
                 )
 
             for attempt_idx in range(2, max_prediction_attempts + 1):
@@ -388,7 +376,7 @@ def evaluate_ablation_vllm(
 
                 pending_indices = next_pending_indices
 
-            # 记录 batch 结果
+            # Record batch-level results.
             for state in sample_states:
                 item = state["item"]
                 answer = item["answer"]
@@ -439,8 +427,8 @@ def evaluate_ablation_vllm(
 
             base_eval.flush_and_sync(out_f)
             print(
-                f"[{ablation_mode}] [Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
-                f"累计处理 {end}/{len(benchmark_items)}，累计跳过 {dropped_total}"
+                f"[{ablation_mode}] [Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
+                f"processed {end}/{len(benchmark_items)} in total, skipped {dropped_total} in total"
             )
 
     if evaluated_total <= 0:
@@ -450,8 +438,8 @@ def evaluate_ablation_vllm(
     partial_acc = partial_score_sum / evaluated_total
 
     print(
-        f"[{ablation_mode}] 评测完成：原始样本 {total}，有效样本 {evaluated_total}，"
-        f"剔除 {dropped_total}，exact_acc={exact_acc:.4f}，partial_acc={partial_acc:.4f}"
+        f"[{ablation_mode}] Evaluation finished: original samples={total}, valid samples={evaluated_total}, "
+        f"removed={dropped_total}, exact_acc={exact_acc:.4f}, partial_acc={partial_acc:.4f}"
     )
 
     return {
@@ -466,9 +454,6 @@ def evaluate_ablation_vllm(
         "dropped_samples": dropped_total,
         "output_file": output_file,
         "tensor_parallel_size": tensor_parallel_size,
-        "requested_data_parallel_size": requested_data_parallel_size,
-        "effective_data_parallel_size": effective_data_parallel_size,
-        "data_parallel_size": effective_data_parallel_size,
     }
 
 
@@ -479,21 +464,19 @@ def _output_with_mode_suffix(output_file: str, mode: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Interleaved-Image-Text 单模态消融 vLLM 评测脚本")
+    parser = argparse.ArgumentParser(description="Interleaved-Image-Text single-modality ablation vLLM evaluation script")
     parser.add_argument(
         "--model_path",
         type=str,
-        default=DEFAULT_QWEN3_5_397B,
-        help="vLLM 模型路径（默认 Qwen3.5-397B）",
     )
-    parser.add_argument("--benchmark_file", type=str, required=True, help="benchmark jsonl 文件路径")
-    parser.add_argument("--output_file", type=str, required=True, help="输出结果 jsonl 路径")
+    parser.add_argument("--benchmark_file", type=str, required=True, help="Path to benchmark jsonl file")
+    parser.add_argument("--output_file", type=str, required=True, help="Path to output result jsonl")
     parser.add_argument(
         "--ablation_mode",
         type=str,
         choices=["text_only", "image_only", "both"],
         default="both",
-        help="单模态消融模式",
+        help="Single-modality ablation mode",
     )
     parser.add_argument("--max_tokens", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -504,26 +487,20 @@ def main() -> None:
         "--max_prediction_retries",
         type=int,
         default=10,
-        help="当 prediction 解析为 None 时，最多重试推理次数（不含首轮）",
+        help="Maximum retry rounds when prediction parses as None (excluding the first attempt)",
     )
     parser.add_argument("--tensor_parallel_size", type=int, default=8)
-    parser.add_argument(
-        "--data_parallel_size",
-        type=int,
-        default=1,
-        help="兼容参数（已弃用）：纯 vLLM 模式固定单副本，不再启用 data parallel。",
-    )
     parser.add_argument(
         "--disable_mm_preprocessor_cache",
         action="store_true",
         default=True,
-        help="默认开启：关闭 vLLM 多模态预处理缓存",
+        help="Enabled by default: disable vLLM multimodal preprocessor cache",
     )
     parser.add_argument(
         "--enable_mm_preprocessor_cache",
         dest="disable_mm_preprocessor_cache",
         action="store_false",
-        help="显式开启 vLLM 多模态预处理缓存",
+        help="Explicitly enable vLLM multimodal preprocessor cache",
     )
     parser.add_argument("--seed", type=int, default=42)
 
@@ -551,7 +528,6 @@ def main() -> None:
             max_model_len=args.max_model_len,
             batch_size=args.batch_size,
             tensor_parallel_size=args.tensor_parallel_size,
-            data_parallel_size=args.data_parallel_size,
             disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
             max_prediction_retries=args.max_prediction_retries,
         )
@@ -559,7 +535,7 @@ def main() -> None:
         summary_path = mode_output_file + ".summary.json"
         with open(summary_path, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
-        print(f"[{mode}] summary 已保存到: {summary_path}")
+        print(f"[{mode}] Summary saved to: {summary_path}")
 
         all_summaries[mode] = summary
 
@@ -567,7 +543,7 @@ def main() -> None:
         merged_summary_path = args.output_file + ".ablation.summary.json"
         with open(merged_summary_path, "w", encoding="utf-8") as f:
             json.dump(all_summaries, f, ensure_ascii=False, indent=2)
-        print(f"[both] 合并 summary 已保存到: {merged_summary_path}")
+        print(f"[both] Merged summary saved to: {merged_summary_path}")
 
 
 if __name__ == "__main__":

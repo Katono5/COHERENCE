@@ -86,7 +86,7 @@ def discover_result_files(result_dir: str) -> List[Dict[str, str]]:
     for current_root, dir_names, file_names in os.walk(result_dir):
         dir_names.sort()
         for filename in sorted(file_names):
-            if not filename.endswith(".jsonl") or filename.endswith(".dropped.jsonl"):
+            if not filename.endswith(".jsonl"):
                 continue
             parsed = parse_result_model_subset(filename, parent_dir=current_root)
             if parsed is None:
@@ -465,7 +465,6 @@ def prepare_inputs_for_vllm(messages: List[Dict[str, Any]], processor: Any) -> D
 def create_vllm_runner(
     model_path: str,
     tensor_parallel_size: int,
-    data_parallel_size: int,
     max_model_len: int,
     max_new_tokens: int,
     temperature: float,
@@ -479,7 +478,6 @@ def create_vllm_runner(
         model=model_path,
         trust_remote_code=True,
         tensor_parallel_size=max(1, int(tensor_parallel_size)),
-        data_parallel_size=max(1, int(data_parallel_size)),
         max_model_len=max(1, int(max_model_len)),
     )
     sampling_params = SamplingParams(
@@ -623,7 +621,6 @@ def analyze_errors_with_vllm(
     output_jsonl: Optional[str],
     output_summary: Optional[str],
     tensor_parallel_size: int,
-    data_parallel_size: int,
     batch_size: int,
     max_model_len: int,
     max_new_tokens: int,
@@ -662,7 +659,6 @@ def analyze_errors_with_vllm(
     llm, sampling_params, processor = create_vllm_runner(
         model_path=vllm_model_path,
         tensor_parallel_size=tensor_parallel_size,
-        data_parallel_size=data_parallel_size,
         max_model_len=max_model_len,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -794,7 +790,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_jsonl", type=str, default=None, help="Per-sample output jsonl.")
     parser.add_argument("--output_summary", type=str, default=None, help="Summary json path.")
     parser.add_argument("--tensor_parallel_size", type=int, default=8, help="vLLM tensor parallel size.")
-    parser.add_argument("--data_parallel_size", type=int, default=1, help="vLLM data parallel size.")
     parser.add_argument("--batch_size", type=int, default=128, help="vLLM batch size.")
     parser.add_argument("--max_model_len", type=int, default=30000, help="vLLM max_model_len.")
     parser.add_argument("--max_new_tokens", type=int, default=8192, help="vLLM max tokens.")
@@ -844,7 +839,6 @@ def main() -> None:
         output_jsonl=args.output_jsonl,
         output_summary=args.output_summary,
         tensor_parallel_size=args.tensor_parallel_size,
-        data_parallel_size=args.data_parallel_size,
         batch_size=args.batch_size,
         max_model_len=args.max_model_len,
         max_new_tokens=args.max_new_tokens,

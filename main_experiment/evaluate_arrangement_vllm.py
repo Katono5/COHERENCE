@@ -1,0 +1,1140 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import argparse
+from collections import Counter
+import json
+import os
+import random
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from PIL import Image
+from transformers import AutoProcessor, __version__ as TRANSFORMERS_VERSION
+
+try:
+    from metrics import kendall_tau_mapped_0_1
+except ImportError:
+    from main_experiment.metrics import kendall_tau_mapped_0_1
+
+try:
+    from qwen_vl_utils import process_vision_info
+except Exception:
+    process_vision_info = None
+
+# 图片根目录
+IMAGES_ROOT = "YOUR PATH HERE"
+PLACEHOLDER = "[IMAGE_PLACEHOLDER]"
+
+
+def is_mm_cache_assertion(err: BaseException) -> bool:
+    return "Expected a cached item for mm_hash=" in str(err)
+
+
+def make_item_key(item: Dict[str, Any]) -> str:
+    """优先按 data_id 去重，缺失时回退到组合键。"""
+    data_id = str(item.get("data_id", "")).strip()
+    if data_id:
+        return f"data_id:{data_id}"
+    return "fallback:" + "|".join(
+        [
+            str(item.get("dataset_type", "")),
+            str(item.get("url_id", "")),
+            str(item.get("title", "")),
+        ]
+    )
+
+
+def _parse_exact_correct(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value != value:  # nan
+            return None
+        return float(value) != 0.0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _to_float_or_none(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+        if parsed != parsed:  # nan
+            return None
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def _partial_from_lists(pred: Any, answer: Any) -> float:
+    return kendall_tau_mapped_0_1(pred, answer)
+
+
+def load_existing_eval_results(output_file: str) -> Dict[str, Any]:
+    if not os.path.exists(output_file):
+        return {"count": 0, "exact_sum": 0.0, "partial_sum": 0.0, "keys": set(), "null_count": 0}
+
+    latest_records: Dict[str, Dict[str, Any]] = {}
+    with open(output_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            key = make_item_key(record)
+            # 同一 key 多次写入时，使用最后一条作为最终结果。
+            latest_records[key] = record
+
+    count = len(latest_records)
+    exact_sum = 0.0
+    partial_sum = 0.0
+    null_count = 0
+    keys: Set[str] = set(latest_records.keys())
+
+    for record in latest_records.values():
+        pred = record.get("prediction")
+        answer = record.get("answer")
+
+        if pred is None:
+            null_count += 1
+
+        parsed_exact = None
+        if "exact_correct" in record:
+            parsed_exact = _parse_exact_correct(record.get("exact_correct"))
+        if parsed_exact is None and isinstance(pred, list) and isinstance(answer, list):
+            parsed_exact = pred == answer
+        exact_sum += 1.0 if parsed_exact else 0.0
+
+        partial_metric = str(record.get("partial_metric", "")).strip().lower()
+        partial_score = (
+            _to_float_or_none(record.get("partial_score"))
+            if partial_metric == "kendall_tau_0_1"
+            else None
+        )
+        if partial_score is None:
+            partial_score = _partial_from_lists(pred, answer)
+        partial_sum += partial_score
+
+    return {
+        "count": count,
+        "exact_sum": exact_sum,
+        "partial_sum": partial_sum,
+        "keys": keys,
+        "null_count": null_count,
+    }
+
+
+def prepare_output_file_for_resume(output_file: str) -> Dict[str, int]:
+    """清理历史结果，仅保留每个 key 的最新记录；latest=null 的样本会被重排队。"""
+    if not os.path.exists(output_file):
+        return {"requeued_count": 0, "kept_count": 0}
+
+    parsed_lines: List[Tuple[str, Optional[str], Optional[Dict[str, Any]]]] = []
+    latest_records: Dict[str, Dict[str, Any]] = {}
+    latest_line_idx: Dict[str, int] = {}
+    valid_line_count = 0
+
+    with open(output_file, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                parsed_lines.append((raw_line, None, None))
+                continue
+
+            key = make_item_key(record)
+            parsed_lines.append((raw_line, key, record))
+            latest_records[key] = record
+            latest_line_idx[key] = len(parsed_lines) - 1
+            valid_line_count += 1
+
+    requeued_keys = {
+        key for key, record in latest_records.items() if record.get("prediction") is None
+    }
+    duplicate_count = max(0, valid_line_count - len(latest_records))
+    if not requeued_keys and duplicate_count == 0:
+        return {"requeued_count": 0, "kept_count": len(latest_records)}
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for idx, (raw_line, key, _record) in enumerate(parsed_lines):
+            if key is None:
+                f.write(raw_line)
+                continue
+            if idx != latest_line_idx.get(key):
+                continue
+            if key in requeued_keys:
+                continue
+            f.write(raw_line)
+
+    return {
+        "requeued_count": len(requeued_keys),
+        "kept_count": len(latest_records) - len(requeued_keys),
+    }
+
+
+def load_existing_dropped_results(dropped_log_file: str) -> Dict[str, Any]:
+    if not os.path.exists(dropped_log_file):
+        return {"count": 0, "keys": set()}
+
+    count = 0
+    keys: Set[str] = set()
+    with open(dropped_log_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            count += 1
+            keys.add(make_item_key(record))
+    return {"count": count, "keys": keys}
+
+
+def remove_items_from_jsonl(jsonl_path: str, items_to_remove: List[Dict[str, Any]]) -> int:
+    if not items_to_remove:
+        return 0
+
+    remove_counter: Counter = Counter(make_item_key(item) for item in items_to_remove)
+    tmp_path = f"{jsonl_path}.tmp"
+    removed = 0
+
+    with open(jsonl_path, "r", encoding="utf-8") as src, open(
+        tmp_path, "w", encoding="utf-8"
+    ) as dst:
+        for line in src:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                obj = json.loads(stripped)
+            except json.JSONDecodeError:
+                dst.write(line)
+                continue
+
+            key = make_item_key(obj)
+            if remove_counter.get(key, 0) > 0:
+                remove_counter[key] -= 1
+                removed += 1
+                continue
+            dst.write(line)
+
+    os.replace(tmp_path, jsonl_path)
+    return removed
+
+
+def collect_pending_items(items: List[Dict[str, Any]], skip_keys: Set[str]) -> Tuple[List[Dict[str, Any]], int]:
+    pending_items: List[Dict[str, Any]] = []
+    seen_pending_keys: Set[str] = set()
+    duplicate_count = 0
+    for item in items:
+        key = make_item_key(item)
+        if key in skip_keys:
+            continue
+        if key in seen_pending_keys:
+            duplicate_count += 1
+            continue
+        seen_pending_keys.add(key)
+        pending_items.append(item)
+    return pending_items, duplicate_count
+
+
+def is_bad_image_error(err: BaseException) -> bool:
+    if isinstance(err, FileNotFoundError):
+        return True
+
+    if not isinstance(err, OSError):
+        return False
+
+    msg = str(err).lower()
+    image_error_patterns = [
+        "image file is truncated",
+        "cannot identify image file",
+        "broken data stream when reading image file",
+        "no such file or directory",
+        "truncated",
+    ]
+    return any(pattern in msg for pattern in image_error_patterns)
+
+
+def _is_qwen_model(model_path: str) -> bool:
+    return "qwen" in model_path.lower()
+
+
+def _is_glm_model(model_path: str) -> bool:
+    lower = model_path.lower()
+    return "glm" in lower or "chatglm" in lower
+
+
+def _major_version(version_str: str) -> Optional[int]:
+    match = re.match(r"^\s*(\d+)", version_str)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _collect_pil_images_from_messages(messages: List[Dict[str, Any]]) -> List[Image.Image]:
+    pil_images: List[Image.Image] = []
+    for message in messages:
+        content = message.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") != "image":
+                continue
+            image_path = part.get("image") or part.get("url")
+            if not isinstance(image_path, str) or not image_path:
+                continue
+            with Image.open(image_path) as img:
+                pil_images.append(img.convert("RGB").copy())
+    return pil_images
+
+
+def _resolve_patch_size(processor: Any) -> int:
+    if hasattr(processor, "image_processor") and hasattr(processor.image_processor, "patch_size"):
+        patch_size = processor.image_processor.patch_size
+    elif hasattr(processor, "image_processor") and hasattr(
+        processor.image_processor, "image_processor_config"
+    ):
+        config = processor.image_processor.image_processor_config
+        patch_size = getattr(config, "patch_size", None)
+    else:
+        patch_size = None
+
+    if patch_size is None:
+        raise AttributeError("processor.image_processor.patch_size is missing")
+    return int(patch_size)
+
+
+def _prepare_inputs_with_qwen_vision_utils(
+    messages: List[Dict[str, Any]], processor: Any
+) -> Dict[str, Any]:
+    if process_vision_info is None:
+        raise RuntimeError("qwen_vl_utils is not available")
+
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    patch_size = _resolve_patch_size(processor)
+    image_inputs, video_inputs, video_kwargs = process_vision_info(
+        messages,
+        image_patch_size=patch_size,
+        return_video_kwargs=True,
+        return_video_metadata=True,
+    )
+
+    if image_inputs is None:
+        raise ValueError("image_inputs is None")
+    mm_data: Dict[str, Any] = {"image": image_inputs}
+    if video_inputs is not None:
+        mm_data["video"] = video_inputs
+
+    prepared = {
+        "prompt": text,
+        "multi_modal_data": mm_data,
+    }
+    if video_kwargs is not None:
+        prepared["mm_processor_kwargs"] = video_kwargs
+    return prepared
+
+
+def _prepare_inputs_generic(messages: List[Dict[str, Any]], processor: Any) -> Dict[str, Any]:
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs = _collect_pil_images_from_messages(messages)
+    if not image_inputs:
+        raise ValueError("no image found in messages")
+    return {
+        "prompt": text,
+        "multi_modal_data": {"image": image_inputs},
+    }
+
+
+def load_processor_with_compat(model_path: str) -> Any:
+    processor_kwargs: Dict[str, Any] = {
+        "trust_remote_code": True,
+    }
+    try:
+        return AutoProcessor.from_pretrained(
+            model_path,
+            fix_mistral_regex=True,
+            **processor_kwargs,
+        )
+    except TypeError:
+        return AutoProcessor.from_pretrained(model_path, **processor_kwargs)
+
+
+def validate_glm_runtime_compat(model_path: str, processor: Any) -> None:
+    if not _is_glm_model(model_path):
+        return
+
+    major = _major_version(TRANSFORMERS_VERSION)
+    has_image_processor = hasattr(processor, "image_processor")
+    if major is not None and major < 5 and not has_image_processor:
+        raise RuntimeError(
+            "检测到 GLM 模型但当前 transformers 版本不满足多模态处理需求："
+            f"当前={TRANSFORMERS_VERSION}。请升级到 transformers>=5.0.0rc0 "
+            "后再运行 evaluate_arrangement_vllm.py。"
+        )
+
+
+def build_llm_with_kwarg_compat(llm_cls: Any, llm_kwargs: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
+    """兼容不同 vLLM 版本：遇到不支持的 kwarg 自动移除后重试。"""
+    resolved_kwargs = dict(llm_kwargs)
+    while True:
+        try:
+            llm = llm_cls(**resolved_kwargs)
+            return llm, resolved_kwargs
+        except TypeError as err:
+            match = re.search(r"unexpected keyword argument ['\"]([^'\"]+)['\"]", str(err))
+            if not match:
+                raise
+            kwarg_name = match.group(1)
+            if kwarg_name not in resolved_kwargs:
+                raise
+            print(f"检测到当前 vLLM 版本不支持 `{kwarg_name}`，已自动忽略并重试。")
+            resolved_kwargs.pop(kwarg_name, None)
+
+
+def _extract_from_content_list(content_list: Any) -> Tuple[str, List[Dict[str, Any]]]:
+    """从 interleaved content 列表中构造文本与图片序列。"""
+    content_parts: List[str] = []
+    image_sequence: List[Dict[str, Any]] = []
+
+    for part in content_list:
+        part_type = part["type"]
+        if part_type == "text":
+            text = part["content"].strip()
+            content_parts.append(text)
+        elif part_type == "image":
+            content_parts.append(PLACEHOLDER)
+            image_sequence.append(
+                {
+                    "id": part["id"],
+                    "image_path": part["image_path"],
+                }
+            )
+        else:
+            raise ValueError(f"Unknown content type: {part_type}")
+
+    return "\n".join(content_parts), image_sequence
+
+
+def normalize_item_for_vllm(item: Dict[str, Any]) -> Dict[str, Any]:
+    """将不同格式的 item 统一为 content(str) + image_sequence(list) 形式。"""
+    content = item["content"]
+    if not isinstance(content, list):
+        raise TypeError("content must be a list")
+    content_text, image_sequence = _extract_from_content_list(content)
+    num_placeholders = item["num_placeholders"]
+    normalized = dict(item)
+    normalized["content"] = content_text
+    normalized["image_sequence"] = image_sequence
+    normalized["num_placeholders"] = num_placeholders
+    return normalized
+
+
+def resolve_image_paths(image_sequence: List[Dict[str, Any]]) -> List[str]:
+    image_paths: List[str] = []
+    for img in image_sequence:
+        rel_path = img.get("image_path", "")
+        if not isinstance(rel_path, str):
+            rel_path = str(rel_path)
+        full_path = rel_path if os.path.isabs(rel_path) else os.path.join(IMAGES_ROOT, rel_path)
+        image_paths.append(full_path)
+    return image_paths
+
+
+def load_benchmark(file_path: str) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    print(f"从 {file_path} 加载 {len(items)} 条样本")
+    return items
+
+
+def ensure_results_dir(path: str) -> None:
+    dir_path = os.path.dirname(path)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+
+def flush_and_sync(*files: Any) -> None:
+    for f in files:
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def build_prompt_part1(item: Dict[str, Any]) -> str:
+    """构建 prompt 的第一部分：任务说明 + 文章内容"""
+    content = item["content"]
+    image_sequence = item["image_sequence"]
+    title = item["title"]
+    num_placeholders = item["num_placeholders"]
+
+    return f"""## Task: Interleaved-Image-Text Matching
+
+You are given an article about "{title}" with {num_placeholders} image placeholders marked as [IMAGE_PLACEHOLDER]. You are also given {len(image_sequence)} candidate images (Image 0, Image 1, ..., Image {len(image_sequence) - 1}) shown below.
+
+Your task is to determine which image should be placed at each placeholder position based on the surrounding text context.
+
+## Article Text (with placeholders):
+
+{content}
+
+## Candidate Images (Image 0 to Image {len(image_sequence) - 1}):
+"""
+
+
+def build_prompt_part2(item: Dict[str, Any]) -> str:
+    """PROMPT 3 Part 2: 详细版本 - 指令说明"""
+    image_sequence = item["image_sequence"]
+    num_placeholders = item["num_placeholders"]
+
+    return f"""
+
+## Instructions:
+
+1. **Read the text carefully**: Each [IMAGE_PLACEHOLDER] appears within a specific context. The surrounding text describes what should be shown in that image.
+
+2. **Analyze each placeholder**: For each placeholder (in order from first to last), identify what the nearby text is describing - this tells you what the image should show.
+
+3. **Match images to placeholders**: Look at the {len(image_sequence)} candidate images provided and determine which image best matches the context around each placeholder.
+
+4. **Important**: The same image index can only be used once. Each placeholder needs a different image.
+
+## Output Format:
+
+First reason step by step, then output your final answer on the LAST line as a Python list:
+- Format: [{", ".join(["index" + str(i) for i in range(num_placeholders)])}]
+- The list position corresponds to the placeholder order (first placeholder is index 0).
+- Each value is the image index to place at that placeholder.
+- Example: [2, 0, 1, 3, 4] means placeholder 1 uses Image 2, placeholder 2 uses Image 0, etc.
+- Do NOT output the inverse mapping (i.e., image -> placeholder).
+- The list must have exactly {num_placeholders} integers, each between 0 and {len(image_sequence) - 1}.
+
+Now analyze the text and images, then provide your answer."""
+
+
+def build_raw_input(item: Dict[str, Any]) -> Dict[str, Any]:
+    image_paths = resolve_image_paths(item["image_sequence"])
+    prompt_part1 = build_prompt_part1(item)
+    prompt_part2 = build_prompt_part2(item)
+    prompt_text = "\n".join(
+        [prompt_part1] + [f"Image {i}:" for i in range(len(image_paths))] + [prompt_part2]
+    )
+    return {"prompt": prompt_text, "images": image_paths}
+
+_LIST_RE = re.compile(r"\[([0-9,\s]+)\]")
+
+
+def parse_prediction_list(text: str) -> Optional[List[int]]:
+    if not text:
+        return None
+    matches = _LIST_RE.findall(text)
+    if not matches:
+        return None
+    inner = matches[-1]
+    parts = inner.replace(" ", "").split(",")
+    try:
+        return [int(p) for p in parts if p != ""]
+    except ValueError:
+        return None
+
+
+def exact_match(pred: List[int], answer: List[int]) -> bool:
+    return pred == answer
+
+
+def partial_match(
+    pred: List[int], answer: List[int], num_placeholders: Optional[int] = None
+) -> float:
+    return kendall_tau_mapped_0_1(pred, answer, num_placeholders)
+
+
+def build_messages_for_vllm(
+    item: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+    """
+    为 vLLM 构建 messages：text -> images -> text 格式。
+    
+    消息顺序：
+    1. Text: prompt_part1 (任务说明 + 文章内容)
+    2. Images: 所有候选图片 (Image 0, Image 1, ...)
+    3. Text: prompt_part2 (指令说明)
+    
+    Args:
+        item: benchmark 数据项
+    """
+    normalized = normalize_item_for_vllm(item)
+    raw_input = build_raw_input(normalized)
+    image_paths = raw_input["images"]
+    prompt_part1 = build_prompt_part1(normalized)
+    prompt_part2 = build_prompt_part2(normalized)
+
+    content: List[Dict[str, Any]] = []
+    content.append({"type": "text", "text": prompt_part1})
+
+    # 添加所有图片（带标签）
+    for idx, full_path in enumerate(image_paths):
+        content.append({"type": "text", "text": f"Image {idx}:"})
+        # 同时提供 image/url 字段，兼容不同模型的 chat_template 约定。
+        content.append({"type": "image", "image": full_path, "url": full_path})
+
+    content.append({"type": "text", "text": prompt_part2})
+    return [{"role": "user", "content": content}], raw_input, normalized
+
+
+def prepare_inputs_for_vllm(
+    messages: List[Dict[str, Any]],
+    processor: Any,
+    model_path: str,
+) -> Dict[str, Any]:
+    """
+    准备 vLLM 输入：
+    - Qwen 优先尝试 qwen_vl_utils（保留现有稳定路径）
+    - 其他模型（如 GLM）默认走通用路径
+    - 任一路径失败会自动回退
+    """
+    errors: List[str] = []
+
+    prefer_qwen_path = _is_qwen_model(model_path)
+    if prefer_qwen_path:
+        try:
+            return _prepare_inputs_with_qwen_vision_utils(messages, processor)
+        except Exception as err:
+            errors.append(f"qwen_vision_utils: {type(err).__name__}: {err}")
+
+    try:
+        return _prepare_inputs_generic(messages, processor)
+    except Exception as err:
+        errors.append(f"generic: {type(err).__name__}: {err}")
+
+    if not prefer_qwen_path:
+        try:
+            return _prepare_inputs_with_qwen_vision_utils(messages, processor)
+        except Exception as err:
+            errors.append(f"qwen_vision_utils_fallback: {type(err).__name__}: {err}")
+
+    raise RuntimeError("prepare_inputs_for_vllm failed: " + " | ".join(errors))
+
+
+def evaluate_vllm(
+    model_path: str,
+    benchmark_items: List[Dict[str, Any]],
+    output_file: str,
+    benchmark_file: Optional[str] = None,
+    max_tokens: int = 512,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    max_model_len: int = 16384,
+    batch_size: int = 8,
+    tensor_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    disable_mm_preprocessor_cache: bool = True,
+    remove_bad_samples_from_benchmark: bool = True,
+    max_prediction_retries: int = 10,
+) -> Dict[str, Any]:
+    """单个 benchmark 文件的 vLLM 评测（two-stage: 预检 -> 推理）。"""
+    from vllm import LLM, SamplingParams
+
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    if data_parallel_size <= 0:
+        raise ValueError("data_parallel_size must be >= 1")
+    requested_data_parallel_size = data_parallel_size
+    effective_data_parallel_size = 1
+    if requested_data_parallel_size != 1:
+        print(
+            "检测到 --data_parallel_size="
+            f"{requested_data_parallel_size}，当前脚本为纯 vLLM 单副本模式，"
+            "该参数将被忽略并固定使用 1。"
+        )
+
+    base_llm_kwargs = {
+        "model": model_path,
+        "trust_remote_code": True,
+        "max_model_len": max_model_len,
+    }
+    if tensor_parallel_size <= 0:
+        raise ValueError("tensor_parallel_size must be >= 1")
+    base_llm_kwargs["tensor_parallel_size"] = tensor_parallel_size
+    if disable_mm_preprocessor_cache:
+        # 兼容新旧参数：新版本推荐 mm_processor_cache_gb=0，旧版本保留 disable 开关。
+        base_llm_kwargs["mm_processor_cache_gb"] = 0
+        base_llm_kwargs["disable_mm_preprocessor_cache"] = True
+        print("稳定性模式：已默认关闭 vLLM 多模态预处理缓存（规避 mm_hash 断言）。")
+
+    processor = load_processor_with_compat(model_path)
+    validate_glm_runtime_compat(model_path, processor)
+
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+
+    total = len(benchmark_items)
+    dropped_items: List[Dict[str, Any]] = []
+    removed_from_benchmark_file = 0
+    if max_prediction_retries < 0:
+        raise ValueError("max_prediction_retries must be >= 0")
+    max_prediction_attempts = max_prediction_retries + 1
+
+    ensure_results_dir(output_file)
+    dropped_log_file = output_file + ".dropped.jsonl"
+    resume_cleanup = prepare_output_file_for_resume(output_file)
+    requeued_count = int(resume_cleanup.get("requeued_count", 0))
+    resume_eval_info = load_existing_eval_results(output_file)
+    resume_dropped_info = load_existing_dropped_results(dropped_log_file)
+    evaluated_total = int(resume_eval_info["count"])
+    exact_correct = float(resume_eval_info["exact_sum"])
+    partial_score_sum = float(resume_eval_info["partial_sum"])
+    null_prediction_count = int(resume_eval_info.get("null_count", 0))
+    dropped_total = int(resume_dropped_info["count"])
+    resumed = bool(evaluated_total > 0 or dropped_total > 0 or requeued_count > 0)
+
+    completed_keys = set(resume_eval_info["keys"])
+    dropped_keys = set(resume_dropped_info["keys"])
+    skip_keys = completed_keys | dropped_keys
+    pending_items, duplicate_pending_count = collect_pending_items(benchmark_items, skip_keys)
+
+    if requeued_count > 0:
+        print(
+            f"检测到 {requeued_count} 条样本的最新结果为 prediction=null，"
+            f"已从 {output_file} 中移除并重新加入待处理队列。"
+        )
+    if duplicate_pending_count > 0:
+        print(
+            f"检测到待处理样本中存在 {duplicate_pending_count} 条重复 data_id，"
+            "已自动去重，仅保留首次出现的记录。"
+        )
+
+    if resumed:
+        print(
+            f"检测到已有结果：已评测 {evaluated_total}/{total} 条，"
+            f"历史 dropped {dropped_total} 条，历史 prediction=null {null_prediction_count} 条"
+            f"（将自动重跑），本次剩余 {len(pending_items)} 条。"
+        )
+
+    if not pending_items:
+        if evaluated_total <= 0:
+            raise ValueError("没有待处理样本，且历史结果为空。")
+        exact_acc = exact_correct / evaluated_total
+        partial_acc = partial_score_sum / evaluated_total
+        print(
+            f"无需继续推理。有效样本 {evaluated_total}，"
+            f"exact_acc={exact_acc:.4f}，partial_acc={partial_acc:.4f}"
+        )
+        return {
+            "mode": "vllm",
+            "model_path": model_path,
+            "tensor_parallel_size": tensor_parallel_size,
+            "requested_data_parallel_size": requested_data_parallel_size,
+            "effective_data_parallel_size": effective_data_parallel_size,
+            "data_parallel_size": effective_data_parallel_size,
+            "total": evaluated_total,
+            "original_total": total,
+            "exact_correct": int(exact_correct),
+            "exact_accuracy": exact_acc,
+            "partial_accuracy": partial_acc,
+            "dropped_samples": dropped_total,
+            "removed_from_benchmark_file": 0,
+            "dropped_log_file": dropped_log_file,
+            "output_file": output_file,
+            "resumed": True,
+        }
+
+    with open(output_file, "a" if resumed else "w", encoding="utf-8") as out_f, open(
+        dropped_log_file, "a" if dropped_total > 0 else "w", encoding="utf-8"
+    ) as dropped_f:
+
+        def record_result(
+            generated_text: str,
+            item: Dict[str, Any],
+            raw_input: Dict[str, Any],
+            normalized: Dict[str, Any],
+            attempts_used: int = 1,
+            retry_errors: Optional[List[str]] = None,
+        ) -> None:
+            nonlocal exact_correct, partial_score_sum, evaluated_total
+            answer = item["answer"]
+            num_placeholders = normalized["num_placeholders"]
+            pred_list = parse_prediction_list(generated_text)
+            if pred_list is None:
+                exact = 0.0
+                partial = 0.0
+            else:
+                exact = 1.0 if exact_match(pred_list, answer) else 0.0
+                partial = partial_match(pred_list, answer, num_placeholders)
+
+            exact_correct += exact
+            partial_score_sum += partial
+            evaluated_total += 1
+
+            model_input: Dict[str, Any] = {
+                "prediction_retry_max": max_prediction_retries,
+                "prediction_attempts": attempts_used,
+            }
+            if retry_errors:
+                model_input["retry_errors"] = retry_errors
+            if pred_list is None:
+                model_input["error"] = "prediction_parse_failed"
+
+            record = {
+                "dataset_type": item["dataset_type"],
+                "data_id": item["data_id"],
+                "url_id": item["url_id"],
+                "title": item["title"],
+                "answer": answer,
+                "prediction": pred_list,
+                "raw_input": raw_input,
+                "model_input": model_input,
+                "raw_output": generated_text,
+                "exact_correct": bool(exact == 1.0),
+                "partial_score": partial,
+                "partial_metric": "kendall_tau_0_1",
+            }
+            out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        def record_dropped_item(
+            item: Dict[str, Any],
+            reason: str,
+            stage: str,
+            sample_idx: Optional[int] = None,
+            batch_idx: Optional[int] = None,
+            sample_idx_in_batch: Optional[int] = None,
+            error: Optional[BaseException] = None,
+            extra: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            nonlocal dropped_total
+            dropped_items.append(item)
+            dropped_record: Dict[str, Any] = {
+                "dataset_type": item.get("dataset_type"),
+                "data_id": item.get("data_id"),
+                "url_id": item.get("url_id"),
+                "title": item.get("title"),
+                "stage": stage,
+                "reason": reason,
+            }
+            if sample_idx is not None:
+                dropped_record["sample_index"] = sample_idx
+            if batch_idx is not None:
+                dropped_record["batch_index"] = batch_idx
+            if sample_idx_in_batch is not None:
+                dropped_record["sample_index_in_batch"] = sample_idx_in_batch
+            if error is not None:
+                dropped_record["error_type"] = type(error).__name__
+                dropped_record["error_message"] = str(error)[:800]
+            if extra:
+                dropped_record.update(extra)
+            dropped_f.write(json.dumps(dropped_record, ensure_ascii=False) + "\n")
+            dropped_total += 1
+
+        # Stage-1: 预检（只构造和检查输入，不做正式推理）
+        print(f"[Stage-1] 开始预检，本次待处理 {len(pending_items)} 条（总样本 {total}）。")
+        valid_samples: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
+        for sample_idx, item in enumerate(pending_items):
+            try:
+                messages, raw_input, normalized = build_messages_for_vllm(item)
+                missing_paths = [p for p in raw_input["images"] if not os.path.exists(p)]
+                if missing_paths:
+                    record_dropped_item(
+                        item=item,
+                        reason="missing_image",
+                        stage="precheck",
+                        sample_idx=sample_idx,
+                        extra={
+                            "missing_count": len(missing_paths),
+                            "first_missing_path": missing_paths[0],
+                        },
+                    )
+                    continue
+                inputs = prepare_inputs_for_vllm(messages, processor, model_path)
+                valid_samples.append((item, raw_input, normalized, inputs))
+            except Exception as err:
+                reason = "bad_image_precheck" if is_bad_image_error(err) else "precheck_exception"
+                record_dropped_item(
+                    item=item,
+                    reason=reason,
+                    stage="precheck",
+                    sample_idx=sample_idx,
+                    error=err,
+                )
+
+        print(
+            f"[Stage-1] 预检完成：通过 {len(valid_samples)} 条，"
+            f"新增剔除 {len(dropped_items)} 条（累计 {dropped_total} 条）。"
+        )
+
+        if remove_bad_samples_from_benchmark and benchmark_file:
+            removed_from_benchmark_file = remove_items_from_jsonl(benchmark_file, dropped_items)
+            if removed_from_benchmark_file > 0:
+                print(
+                    "[Stage-1] 已从 benchmark 文件删除预检失败样本: "
+                    f"{removed_from_benchmark_file} 条"
+                )
+
+        if valid_samples:
+            print(f"[Stage-2] 开始正式推理，仅处理 {len(valid_samples)} 条通过预检样本。")
+            llm, resolved_llm_kwargs = build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
+
+            num_batches = (len(valid_samples) + batch_size - 1) // batch_size
+            for batch_idx in range(num_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, len(valid_samples))
+                batch_samples = valid_samples[start:end]
+                batch_inputs = [sample[3] for sample in batch_samples]
+
+                try:
+                    outputs = list(llm.generate(batch_inputs, sampling_params=sampling_params))
+                except Exception as err:
+                    if is_mm_cache_assertion(err):
+                        print(
+                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} 触发 mm_hash 断言，"
+                            "该 batch 将被跳过并重建引擎后继续。"
+                        )
+                        for sample_idx_in_batch, (item, _, _, _) in enumerate(batch_samples):
+                            record_dropped_item(
+                                item=item,
+                                reason="mm_cache_assertion_inference",
+                                stage="inference",
+                                batch_idx=batch_idx + 1,
+                                sample_idx_in_batch=sample_idx_in_batch,
+                                error=err,
+                            )
+                        flush_and_sync(dropped_f)
+                        try:
+                            del llm
+                            llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
+                        except Exception:
+                            raise
+                        continue
+                    raise
+
+                sample_states: List[Dict[str, Any]] = []
+                for sample_idx_in_batch, (item, raw_input, normalized, sample_input) in enumerate(batch_samples):
+                    generated_text = ""
+                    if sample_idx_in_batch < len(outputs):
+                        output = outputs[sample_idx_in_batch]
+                        if output is not None and getattr(output, "outputs", None):
+                            generated_text = output.outputs[0].text or ""
+                    sample_states.append(
+                        {
+                            "item": item,
+                            "raw_input": raw_input,
+                            "normalized": normalized,
+                            "sample_input": sample_input,
+                            "generated_text": generated_text,
+                            "attempts_used": 1,
+                            "retry_errors": [],
+                        }
+                    )
+
+                pending_indices = [
+                    idx
+                    for idx, state in enumerate(sample_states)
+                    if parse_prediction_list(state["generated_text"]) is None
+                ]
+                if pending_indices:
+                    print(
+                        f"[Stage-2] batch {batch_idx + 1}/{num_batches} 首轮后有 "
+                        f"{len(pending_indices)}/{len(sample_states)} 条 prediction=null，"
+                        f"将按批重试（最多 {max_prediction_retries} 轮）。"
+                    )
+
+                for attempt_idx in range(2, max_prediction_attempts + 1):
+                    if not pending_indices:
+                        break
+
+                    retry_inputs = [sample_states[idx]["sample_input"] for idx in pending_indices]
+                    for idx in pending_indices:
+                        sample_states[idx]["attempts_used"] = attempt_idx
+
+                    try:
+                        retry_outputs = list(llm.generate(retry_inputs, sampling_params=sampling_params))
+                    except Exception as retry_err:
+                        err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
+                        if is_mm_cache_assertion(retry_err):
+                            print(
+                                f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
+                                f"{attempt_idx}/{max_prediction_attempts} 次触发 mm_hash 断言，"
+                                "将重建引擎后继续。"
+                            )
+                            err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
+                            try:
+                                del llm
+                                llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
+                            except Exception:
+                                raise
+                        else:
+                            print(
+                                f"[Stage-2] batch {batch_idx + 1}/{num_batches} 批量重试第 "
+                                f"{attempt_idx}/{max_prediction_attempts} 次失败: "
+                                f"{type(retry_err).__name__}: {retry_err}"
+                            )
+
+                        for idx in pending_indices:
+                            sample_states[idx]["retry_errors"].append(err_msg)
+                        continue
+
+                    next_pending_indices: List[int] = []
+                    for output_idx, sample_idx in enumerate(pending_indices):
+                        generated_text = ""
+                        if output_idx < len(retry_outputs):
+                            retry_output = retry_outputs[output_idx]
+                            if retry_output is not None and getattr(retry_output, "outputs", None):
+                                generated_text = retry_output.outputs[0].text or ""
+                        sample_states[sample_idx]["generated_text"] = generated_text
+
+                        if parse_prediction_list(generated_text) is None:
+                            next_pending_indices.append(sample_idx)
+
+                    pending_indices = next_pending_indices
+
+                for state in sample_states:
+                    record_result(
+                        state["generated_text"],
+                        state["item"],
+                        state["raw_input"],
+                        state["normalized"],
+                        attempts_used=int(state["attempts_used"]),
+                        retry_errors=list(state["retry_errors"]),
+                    )
+
+                flush_and_sync(out_f, dropped_f)
+                print(
+                    f"[Stage-2] 完成 batch {batch_idx + 1}/{num_batches}，"
+                    f"已处理 {end}/{len(valid_samples)} 条通过预检样本"
+                )
+        else:
+            print("[Stage-2] 本次无新增通过预检样本，跳过推理。")
+
+    if evaluated_total <= 0:
+        raise ValueError("No valid sample left after dropping bad samples")
+    exact_acc = exact_correct / evaluated_total
+    partial_acc = partial_score_sum / evaluated_total
+    print(
+        f"vLLM 评测完成，原始样本 {total}，有效样本 {evaluated_total}，"
+        f"跳过样本 {dropped_total}，"
+        f"exact_match 正确 {int(exact_correct)}，exact_acc={exact_acc:.4f}，"
+        f"partial_acc={partial_acc:.4f}"
+    )
+
+    return {
+        "mode": "vllm",
+        "model_path": model_path,
+        "tensor_parallel_size": tensor_parallel_size,
+        "requested_data_parallel_size": requested_data_parallel_size,
+        "effective_data_parallel_size": effective_data_parallel_size,
+        "data_parallel_size": effective_data_parallel_size,
+        "total": evaluated_total,
+        "original_total": total,
+        "exact_correct": int(exact_correct),
+        "exact_accuracy": exact_acc,
+        "partial_accuracy": partial_acc,
+        "dropped_samples": dropped_total,
+        "removed_from_benchmark_file": removed_from_benchmark_file,
+        "dropped_log_file": dropped_log_file,
+        "output_file": output_file,
+        "resumed": resumed,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Interleaved-Image-Text Matching vLLM 评测脚本")
+    parser.add_argument("--model_path", type=str, required=True, help="vLLM 模型路径")
+    parser.add_argument("--benchmark_file", type=str, required=True, help="benchmark jsonl 文件路径")
+    parser.add_argument("--output_file", type=str, required=True, help="结果输出 jsonl 路径")
+    parser.add_argument("--max_tokens", type=int, default=512)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--max_model_len", type=int, default=16384)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--max_prediction_retries",
+        type=int,
+        default=10,
+        help="当 prediction 解析为 None 时，最多重试推理次数（不含首轮）",
+    )
+    parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument(
+        "--data_parallel_size",
+        type=int,
+        default=1,
+        help="兼容参数（已弃用）：纯 vLLM 模式固定单副本，不再启用 data parallel。",
+    )
+    parser.add_argument(
+        "--disable_mm_preprocessor_cache",
+        action="store_true",
+        default=True,
+        help=(
+            "默认开启：关闭 vLLM 多模态预处理缓存，规避 "
+            "`Expected a cached item for mm_hash` 断言错误。"
+        ),
+    )
+    parser.add_argument(
+        "--enable_mm_preprocessor_cache",
+        dest="disable_mm_preprocessor_cache",
+        action="store_false",
+        help="显式开启 vLLM 多模态预处理缓存（仅在你确认当前版本稳定时使用）。",
+    )
+    parser.add_argument(
+        "--remove_bad_samples_from_benchmark",
+        action="store_true",
+        default=True,
+        help="默认开启：预检失败样本会从 benchmark_file 中直接删除。",
+    )
+    parser.add_argument(
+        "--keep_bad_samples_in_benchmark",
+        dest="remove_bad_samples_from_benchmark",
+        action="store_false",
+        help="不改写 benchmark_file，仅在当前运行中跳过坏样本。",
+    )
+
+    args = parser.parse_args()
+    random.seed(42)
+
+    items = load_benchmark(args.benchmark_file)
+    summary = evaluate_vllm(
+        model_path=args.model_path,
+        benchmark_items=items,
+        output_file=args.output_file,
+        benchmark_file=args.benchmark_file,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_model_len=args.max_model_len,
+        batch_size=args.batch_size,
+        max_prediction_retries=args.max_prediction_retries,
+        tensor_parallel_size=args.tensor_parallel_size,
+        data_parallel_size=args.data_parallel_size,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        remove_bad_samples_from_benchmark=args.remove_bad_samples_from_benchmark,
+    )
+
+    summary_path = args.output_file + ".summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"评测 summary 已保存到: {summary_path}")
+
+
+if __name__ == "__main__":
+    main()

@@ -40,7 +40,6 @@ done
 
 if [[ ! -d "${MODEL_PATH}" ]]; then
   echo "Model directory not found: ${MODEL_PATH}"
-  echo "Please place Qwen3.5-397B under COHERENCE/models/Qwen3.5-397B, or set MODEL_PATH explicitly."
   exit 1
 fi
 
@@ -53,7 +52,7 @@ echo "=========================================="
 
 for bench in "${BENCH_FILES[@]}"; do
   bench_base="$(basename "${bench}" .jsonl)"
-  output_file="${OUTPUT_DIR}/Qwen3.5-397B_${bench_base}_ablation_image_only.jsonl"
+  output_file="${OUTPUT_DIR}/${bench_base}_ablation_image_only.jsonl"
 
   echo "[RUN][image_only] benchmark=${bench}"
   echo "[RUN][image_only] output=${output_file}"

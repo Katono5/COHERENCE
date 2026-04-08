@@ -22,25 +22,6 @@ In addition, models must integrate evidence across paragraphs and modalities for
 
 To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in long interleaved multimodal context. COHERENCE covers four representative domains and contains **6,161** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
 
-## Results Snapshot
-
-To keep this README clean, we provide concise highlights instead of large tables.
-(`Exact` = exact-match accuracy, `Partial/Kendall` = Kendall-based partial score.)
-
-### Main Results (Domain-Level)
-
-- Best open-source overall model: `Qwen3.5 397B-A17` with `62.24 Exact / 87.41 Partial`.
-- Best closed-source overall model: `Gemini-3.1-pro-preview-thinking` with `69.09 Exact / 89.64 Partial`.
-- Strong closed-source runner-up: `GPT-5.4-high` with `67.25 Exact / 89.05 Partial`.
-- Domain bests (closed-source): `Gemini-3.1-pro-preview-thinking` leads on `WikiHow` and `StoryBird`, while `GPT-5.4-high` leads on `Cooking` and `Science`.
-
-### Difficulty Results
-
-- Best open-source overall by difficulty: `Qwen3.5 397B-A17` with `62.24 Exact / 87.41 Kendall`.
-- Best closed-source overall by difficulty: `Gemini-3.1-pro-preview-thinking` with `69.09 Exact / 89.64 Kendall`.
-- Hard split remains challenging across all families; best hard exact scores are around `27-28%`.
-- COHERENCE still shows a clear gap between Easy/Medium and Hard settings, indicating room for progress in long-context fine-grained alignment.
-
 ## Repository Structure
 
 ```text

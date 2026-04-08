@@ -18,9 +18,9 @@ This repository contains the evaluation code for **COHERENCE**.
 
 In recent years, Multimodal Large Language Models (MLLMs) have achieved strong progress on many multimodal benchmarks. However, most existing benchmarks mainly evaluate single-image understanding, multi-image comparison, or general multimodal question answering. In real-world settings such as document reading, information is often presented as long interleaved image-text context. This requires models to not only understand each individual image, but also perform fine-grained image-text alignment and identify accurate correspondences between textual and visual content across long context.
 
-In addition, models must integrate evidence across paragraphs and modalities for reasoning. Although this capability is important for practical applications, systematic benchmarks for quantifying fine-grained understanding in long interleaved image-text context are still limited.
+In addition, models must integrate evidence across paragraphs and modalities for reasoning. Although this capability is important for practical applications, systematic benchmarks for quantifying fine-grained understanding in interleaved image-text context are still limited.
 
-To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in long interleaved multimodal context. COHERENCE covers four representative domains and contains **7,670** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
+To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in long interleaved multimodal context. COHERENCE covers four representative domains and contains **6,161** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
 
 ## Results Snapshot
 

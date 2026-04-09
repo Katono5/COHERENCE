@@ -2,11 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COHERENCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PY_SCRIPT="${SCRIPT_DIR}/evaluate_arrangement_ablation_vllm.py"
 MODEL_PATH="MODEL PATH HERE"
-BENCH_DIR="${COHERENCE_ROOT}/datasets/benchmark_data"
+JSONL_DIR="../../datasets/jsonl"
+COHERENCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${1:-${COHERENCE_ROOT}/results/ablation_image_only}"
 
 TP_SIZE="${TP_SIZE:-8}"
@@ -18,44 +18,43 @@ TOP_P="${TOP_P:-1.0}"
 MAX_PREDICTION_RETRIES="${MAX_PREDICTION_RETRIES:-0}"
 
 BENCH_FILES=(
-  "${BENCH_DIR}/cooking.jsonl"
-  "${BENCH_DIR}/science.jsonl"
-  "${BENCH_DIR}/storybird.jsonl"
-  "${BENCH_DIR}/wikihow.jsonl"
+  "${JSONL_DIR}/cooking.jsonl"
+  "${JSONL_DIR}/science.jsonl"
+  "${JSONL_DIR}/storybird.jsonl"
+  "${JSONL_DIR}/wikihow.jsonl"
 )
 
 mkdir -p "${OUTPUT_DIR}"
 
 if [[ ! -f "${PY_SCRIPT}" ]]; then
-  echo "Script not found: ${PY_SCRIPT}"
+  echo "Script not found."
   exit 1
 fi
 
 for bench in "${BENCH_FILES[@]}"; do
   if [[ ! -f "${bench}" ]]; then
-    echo "Benchmark file not found: ${bench}"
+    echo "Benchmark file not found."
     exit 1
   fi
 done
 
 if [[ ! -d "${MODEL_PATH}" ]]; then
-  echo "Model directory not found: ${MODEL_PATH}"
+  echo "Model directory not found."
+  echo "Please set MODEL_PATH explicitly."
   exit 1
 fi
 
 echo "=========================================="
 echo "Ablation Experiment: image_only"
-echo "Model: ${MODEL_PATH}"
 echo "TP=${TP_SIZE}"
-echo "Output Dir: ${OUTPUT_DIR}"
+echo "Model Config: [REDACTED]"
 echo "=========================================="
 
 for bench in "${BENCH_FILES[@]}"; do
   bench_base="$(basename "${bench}" .jsonl)"
   output_file="${OUTPUT_DIR}/${bench_base}_ablation_image_only.jsonl"
 
-  echo "[RUN][image_only] benchmark=${bench}"
-  echo "[RUN][image_only] output=${output_file}"
+  echo "[RUN][image_only] benchmark=${bench_base}"
 
   python "${PY_SCRIPT}" \
     --model_path "${MODEL_PATH}" \

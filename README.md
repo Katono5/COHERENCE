@@ -16,35 +16,46 @@ This repository contains the evaluation code for **COHERENCE**.
 
 ## Introduction
 
-In recent years, Multimodal Large Language Models (MLLMs) have achieved strong progress on many multimodal benchmarks. However, most existing benchmarks mainly evaluate single-image understanding, multi-image comparison, or general multimodal question answering. In real-world settings such as document reading, information is often presented as long interleaved image-text context. This requires models to not only understand each individual image, but also perform fine-grained image-text alignment and identify accurate correspondences between textual and visual content across long context.
+In recent years, Multimodal Large Language Models (MLLMs) have achieved strong progress on many multimodal benchmarks. However, most existing benchmarks mainly evaluate single-image understanding, multi-image comparison, or general multimodal question answering. In real-world settings such as document reading, information is often presented as interleaved image-text context. This requires models to not only understand each individual image, but also perform fine-grained image-text alignment and identify accurate correspondences between textual and visual content across context.
 
 In addition, models must integrate evidence across paragraphs and modalities for reasoning. Although this capability is important for practical applications, systematic benchmarks for quantifying fine-grained understanding in interleaved image-text context are still limited.
 
-To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in long interleaved multimodal context. COHERENCE covers four representative domains and contains **6,161** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
+To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in interleaved multimodal context. COHERENCE covers four representative domains and contains **7,670** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
+
+## Results Snapshot
+
+To keep this README clean, we provide concise highlights instead of large tables.
+(`Exact` = exact-match accuracy, `Partial/Kendall` = Kendall-based partial score.)
+
+### Main Results
+
+- Best open-source overall model: `Qwen3.5 397B-A17` with `64.81 Exact / 88.37 Partial`.
+- Best closed-source overall model: `Gemini-3.1-pro-preview-thinking` with `71.82 Exact / 90.11 Partial`.
+- Strong closed-source runner-up: `GPT-5.4-high` with `71.29 Exact / 86.54 Partial`.
+- Domain bests (closed-source): `Gemini-3.1-pro-preview-thinking` leads on `WikiHow` and `StoryBird`, while `GPT-5.4-high` leads on `Cooking` and `Science`.
 
 ## Repository Structure
 
 ```text
 .
-├── main_experiment/
-│   ├── evaluate_arrangement_vllm.py
-│   ├── evaluate_arrangement_api.py
-│   ├── run_main_vllm.sh
-│   ├── run_main_api.sh
-│   ├── error_analysis.py
-│   ├── metrics.py
-│   ├── stats_accuracy_by_domain.py
-│   └── stats_accuracy_by_difficulty.py
-└── ablation_experiment/
-    ├── evaluate_arrangement_ablation_vllm.py
-    ├── run_ablation_text_only.sh
-    └── run_ablation_image_only.sh
+├── code/
+│   ├── main_experiment/
+│   │   ├── evaluate_arrangement_vllm.py
+│   │   ├── evaluate_arrangement_api.py
+│   │   ├── run_main_vllm.sh
+│   │   ├── run_main_api.sh
+│   │   ├── error_analysis.py
+│   │   ├── metrics.py
+│   │   ├── stats_accuracy_by_domain.py
+│   │   └── stats_accuracy_by_difficulty.py
+│   └── ablation_experiment/
+│       ├── evaluate_arrangement_ablation_vllm.py
+│       ├── run_ablation_text_only.sh
+│       └── run_ablation_image_only.sh
+└── datasets/  # created after download
 ```
 
 ## Installation
-
-- Python 3.10+
-- Linux with GPU for vLLM evaluation
 
 ```bash
 pip install -U vllm transformers pillow tqdm openai
@@ -88,40 +99,13 @@ huggingface-cli download BingliW/COHERENCE \
   --local-dir datasets
 ```
 
-Expected local structure (examples):
+Current defaults are already aligned with the above download command.
 
-- `datasets/images/...`
-- `datasets/benchmark_data/...`
+### Step 3. Minimal config
 
-### Step 3. Update paths in scripts
-
-If you have already replaced placeholders with real local paths, you can skip this step.
-
-1. Set image root:
-
-- `main_experiment/evaluate_arrangement_vllm.py`
-- `main_experiment/evaluate_arrangement_api.py`
-- `main_experiment/error_analysis.py`
-
-Set `IMAGES_ROOT` to your local `datasets/images` absolute path.
-Some files may use placeholders like `IMAGES_ROOT = "IMAGE PATH HERE"` or `IMAGES_ROOT = "Your Path Here"`.
-
-2. Set benchmark path:
-
-- `main_experiment/run_main_api.sh`: edit `BENCH_DIR` and `BENCH_FILES`
-- `main_experiment/run_main_vllm.sh`: edit `BENCH_DIR` and `BENCH_FILES`
-
-Use the path that matches your downloaded files, for example:
-
-- `datasets/benchmark_data/` with files like `cooking.jsonl`, `science.jsonl`, `storybird.jsonl`, `wikihow.jsonl`
-
-3. Set model path for vLLM:
-
-- `main_experiment/run_main_vllm.sh` -> `MODEL_PATH`
-- `ablation_experiment/run_ablation_text_only.sh` -> `MODEL_PATH`
-- `ablation_experiment/run_ablation_image_only.sh` -> `MODEL_PATH`
-
-If a script still shows `MODEL_PATH="MODEL PATH HERE"`, replace it with your local model directory.
+- API route: set `API_BASE`, `API_KEY`, `API_MODEL`.
+- vLLM route / ablation: set `MODEL_PATH` in the corresponding `.sh` script.
+- Optional only if you use a custom data layout: adjust `JSONL_DIR` and/or `IMAGES_ROOT`.
 
 ### Step 4A. Run API evaluation
 
@@ -130,30 +114,30 @@ export API_BASE="https://your-api-base/v1"
 export API_KEY="your_api_key"
 export API_MODEL="your_model_name"
 
-bash main_experiment/run_main_api.sh main_experiment/results
+bash code/main_experiment/run_main_api.sh code/main_experiment/results
 ```
 
 ### Step 4B. Run vLLM evaluation
 
 ```bash
 # Optional: export TP_SIZE=1 (or another value)
-bash main_experiment/run_main_vllm.sh main_experiment/results
+bash code/main_experiment/run_main_vllm.sh code/main_experiment/results
 ```
 
-After running, predictions are written to `main_experiment/results/...` and each jsonl has a matching `.summary.json`.
+After running, predictions are written to `code/main_experiment/results/...` and each jsonl has a matching `.summary.json`.
 
 ## Ablation
 
 ### Text-only
 
 ```bash
-bash ablation_experiment/run_ablation_text_only.sh results/ablation_text_only
+bash code/ablation_experiment/run_ablation_text_only.sh code/results/ablation_text_only
 ```
 
 ### Image-only
 
 ```bash
-bash ablation_experiment/run_ablation_image_only.sh results/ablation_image_only
+bash code/ablation_experiment/run_ablation_image_only.sh code/results/ablation_image_only
 ```
 
 ## Output Format
@@ -173,7 +157,7 @@ Typical record fields:
 ## Error Analysis
 
 ```bash
-python main_experiment/error_analysis.py --help
+python code/main_experiment/error_analysis.py --help
 ```
 
 ## Notes

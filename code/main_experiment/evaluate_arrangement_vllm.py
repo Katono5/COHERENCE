@@ -20,8 +20,8 @@ try:
 except Exception:
     process_vision_info = None
 
-# Image root directory
-IMAGES_ROOT = "IMAGE PATH HERE"
+# Image root directory (relative path)
+IMAGES_ROOT = "../../datasets/images"
 PLACEHOLDER = "[IMAGE_PLACEHOLDER]"
 
 
@@ -596,6 +596,7 @@ def evaluate_vllm(
     tensor_parallel_size: int = 1,
     disable_mm_preprocessor_cache: bool = True,
     max_prediction_retries: int = 10,
+    requeue_null_predictions: bool = True,
 ) -> Dict[str, Any]:
     """Run vLLM evaluation for a single benchmark file (batched inference without pre-check)."""
     from vllm import LLM, SamplingParams
@@ -632,8 +633,10 @@ def evaluate_vllm(
     max_prediction_attempts = max_prediction_retries + 1
 
     ensure_results_dir(output_file)
-    resume_cleanup = prepare_output_file_for_resume(output_file)
-    requeued_count = int(resume_cleanup.get("requeued_count", 0))
+    requeued_count = 0
+    if requeue_null_predictions:
+        resume_cleanup = prepare_output_file_for_resume(output_file)
+        requeued_count = int(resume_cleanup.get("requeued_count", 0))
     resume_eval_info = load_existing_eval_results(output_file)
     evaluated_total = int(resume_eval_info["count"])
     exact_correct = float(resume_eval_info["exact_sum"])
@@ -657,10 +660,11 @@ def evaluate_vllm(
         )
 
     if resumed:
+        null_policy = "will be rerun automatically" if requeue_null_predictions else "will be kept and skipped"
         print(
             f"Detected existing results: {evaluated_total}/{total} already evaluated, "
             f"historical prediction=null count={null_prediction_count} "
-            f"(will be rerun automatically), remaining this run={len(pending_items)}."
+            f"({null_policy}), remaining this run={len(pending_items)}."
         )
 
     if not pending_items:
@@ -739,6 +743,7 @@ def evaluate_vllm(
         print(f"[Stage-2] Inference started. Pending this run: {len(pending_items)} (total samples: {total}).")
         llm, resolved_llm_kwargs = build_llm_with_kwarg_compat(LLM, base_llm_kwargs)
 
+        retry_pool: List[Dict[str, Any]] = []
         num_batches = (len(pending_items) + batch_size - 1) // batch_size
         for batch_idx in range(num_batches):
             start = batch_idx * batch_size
@@ -806,68 +811,113 @@ def evaluate_vllm(
                     }
                 )
 
-            pending_indices = [
-                idx
-                for idx, state in enumerate(sample_states)
-                if parse_prediction_list(state["generated_text"]) is None
-            ]
-            if pending_indices:
+            batch_null_count = 0
+            for state in sample_states:
+                if parse_prediction_list(state["generated_text"]) is None:
+                    retry_pool.append(state)
+                    batch_null_count += 1
+                else:
+                    record_result(
+                        state["generated_text"],
+                        state["item"],
+                        state["raw_input"],
+                        state["normalized"],
+                        attempts_used=int(state["attempts_used"]),
+                        retry_errors=list(state["retry_errors"]),
+                    )
+
+            if batch_null_count:
                 print(
                     f"[Stage-2] batch {batch_idx + 1}/{num_batches} after first pass has "
-                    f"{len(pending_indices)}/{len(sample_states)} prediction=null samples; "
-                    f"batch retries will run (max {max_prediction_retries} rounds)."
+                    f"{batch_null_count}/{len(sample_states)} prediction=null samples; "
+                    "queued for global retries after all first-pass batches."
                 )
 
+            flush_and_sync(out_f)
+            print(
+                f"[Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
+                f"processed {end}/{len(pending_items)} in total, "
+                f"queued_null={len(retry_pool)}, skipped {dropped_total} in total"
+            )
+
+        if retry_pool and max_prediction_retries > 0:
+            print(
+                f"[Stage-2] First pass finished. Global retry queue size={len(retry_pool)}; "
+                f"max retry rounds={max_prediction_retries}."
+            )
+
+            pending_indices = [
+                idx
+                for idx, state in enumerate(retry_pool)
+                if parse_prediction_list(state["generated_text"]) is None
+            ]
             for attempt_idx in range(2, max_prediction_attempts + 1):
                 if not pending_indices:
                     break
 
-                retry_inputs = [sample_states[idx]["sample_input"] for idx in pending_indices]
-                for idx in pending_indices:
-                    sample_states[idx]["attempts_used"] = attempt_idx
-
-                try:
-                    retry_outputs = list(llm.generate(retry_inputs, sampling_params=sampling_params))
-                except Exception as retry_err:
-                    err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
-                    if is_mm_cache_assertion(retry_err):
-                        print(
-                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} batch retry "
-                            f"{attempt_idx}/{max_prediction_attempts} hit mm_hash assertion; "
-                            "rebuilding engine before continuing."
-                        )
-                        err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
-                        try:
-                            del llm
-                            llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
-                        except Exception:
-                            raise
-                    else:
-                        print(
-                            f"[Stage-2] batch {batch_idx + 1}/{num_batches} batch retry "
-                            f"{attempt_idx}/{max_prediction_attempts} failed: "
-                            f"{type(retry_err).__name__}: {retry_err}"
-                        )
-
-                    for idx in pending_indices:
-                        sample_states[idx]["retry_errors"].append(err_msg)
-                    continue
-
+                print(
+                    f"[Stage-2] Global retry round {attempt_idx - 1}/{max_prediction_retries}: "
+                    f"pending={len(pending_indices)}"
+                )
                 next_pending_indices: List[int] = []
-                for output_idx, sample_idx in enumerate(pending_indices):
-                    generated_text = ""
-                    if output_idx < len(retry_outputs):
-                        retry_output = retry_outputs[output_idx]
-                        if retry_output is not None and getattr(retry_output, "outputs", None):
-                            generated_text = retry_output.outputs[0].text or ""
-                    sample_states[sample_idx]["generated_text"] = generated_text
 
-                    if parse_prediction_list(generated_text) is None:
-                        next_pending_indices.append(sample_idx)
+                for chunk_start in range(0, len(pending_indices), batch_size):
+                    chunk_indices = pending_indices[chunk_start : chunk_start + batch_size]
+                    retry_inputs = [retry_pool[idx]["sample_input"] for idx in chunk_indices]
+                    for idx in chunk_indices:
+                        retry_pool[idx]["attempts_used"] = attempt_idx
+
+                    try:
+                        retry_outputs = list(llm.generate(retry_inputs, sampling_params=sampling_params))
+                    except Exception as retry_err:
+                        err_msg = f"attempt_{attempt_idx}: {type(retry_err).__name__}: {retry_err}"
+                        if is_mm_cache_assertion(retry_err):
+                            print(
+                                f"[Stage-2] global retry {attempt_idx}/{max_prediction_attempts} "
+                                "hit mm_hash assertion; rebuilding engine before continuing."
+                            )
+                            err_msg = f"attempt_{attempt_idx}: mm_cache_assertion: {retry_err}"
+                            try:
+                                del llm
+                                llm, _ = build_llm_with_kwarg_compat(LLM, resolved_llm_kwargs)
+                            except Exception:
+                                raise
+                        else:
+                            print(
+                                f"[Stage-2] global retry {attempt_idx}/{max_prediction_attempts} "
+                                f"failed for chunk size={len(chunk_indices)}: "
+                                f"{type(retry_err).__name__}: {retry_err}"
+                            )
+
+                        for idx in chunk_indices:
+                            retry_pool[idx]["retry_errors"].append(err_msg)
+                        next_pending_indices.extend(chunk_indices)
+                        continue
+
+                    for output_idx, sample_idx in enumerate(chunk_indices):
+                        generated_text = ""
+                        if output_idx < len(retry_outputs):
+                            retry_output = retry_outputs[output_idx]
+                            if retry_output is not None and getattr(retry_output, "outputs", None):
+                                generated_text = retry_output.outputs[0].text or ""
+                        retry_pool[sample_idx]["generated_text"] = generated_text
+
+                        if parse_prediction_list(generated_text) is None:
+                            next_pending_indices.append(sample_idx)
 
                 pending_indices = next_pending_indices
 
-            for state in sample_states:
+        if retry_pool:
+            unresolved_after_retry = sum(
+                1
+                for state in retry_pool
+                if parse_prediction_list(state["generated_text"]) is None
+            )
+            print(
+                f"[Stage-2] Writing final results for queued null samples: total={len(retry_pool)}, "
+                f"still_null={unresolved_after_retry}"
+            )
+            for state in retry_pool:
                 record_result(
                     state["generated_text"],
                     state["item"],
@@ -876,12 +926,7 @@ def evaluate_vllm(
                     attempts_used=int(state["attempts_used"]),
                     retry_errors=list(state["retry_errors"]),
                 )
-
             flush_and_sync(out_f)
-            print(
-                f"[Stage-2] Completed batch {batch_idx + 1}/{num_batches}, "
-                f"processed {end}/{len(pending_items)} in total, skipped {dropped_total} in total"
-            )
 
     if evaluated_total <= 0:
         raise ValueError("No valid sample left after inference")
@@ -925,6 +970,16 @@ def main() -> None:
         default=10,
         help="Maximum retry rounds when prediction parses as None (excluding the first attempt)",
     )
+    parser.add_argument(
+        "--requeue_null_predictions",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help=(
+            "Whether to remove historical prediction=null records and re-run them on resume. "
+            "1: requeue null records (default), 0: keep null records and skip them."
+        ),
+    )
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument(
         "--disable_mm_preprocessor_cache",
@@ -956,6 +1011,7 @@ def main() -> None:
         max_model_len=args.max_model_len,
         batch_size=args.batch_size,
         max_prediction_retries=args.max_prediction_retries,
+        requeue_null_predictions=bool(args.requeue_null_predictions),
         tensor_parallel_size=args.tensor_parallel_size,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )

@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover
         return iterable
 
 
-IMAGES_ROOT = "Your Path Here"
+IMAGES_ROOT = "../../datasets/images"
 
 SUBSETS = ["wikihow", "storybird", "cooking", "science"]
 RESULT_FILE_RE = re.compile(
@@ -104,8 +104,8 @@ def discover_result_files(result_dir: str) -> List[Dict[str, str]]:
         raise ValueError(
             "No valid eval jsonl files found under "
             f"{result_dir}. Expected names like "
-            "'model_wikihow_full.reasonable_api_eval.jsonl' or "
-            "'wikihow_full.reasonable_api_eval.jsonl'."
+            "'model_wikihow_full.reasonable_vllm_eval.jsonl' or "
+            "'wikihow_full.reasonable_vllm_eval.jsonl'."
         )
 
     discovered.sort(key=lambda item: (item["model"], item["subset"], item["path"]))
@@ -785,7 +785,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--result_dir", type=str, required=True, help="Folder of eval jsonl files.")
     parser.add_argument(
-        "--vllm_model_path", type=str, default="/mnt/shared-storage-gpfs2/gpfs2-shared-public/huggingface/zskj-hub/models--Qwen--Qwen3.5-397B-A17B/", help="vLLM model path for judge inference."
+        "--vllm_model_path",
+        type=str,
+        default="<VLLM_MODEL_PATH>",
+        help="vLLM model path for judge inference.",
     )
     parser.add_argument("--output_jsonl", type=str, default=None, help="Per-sample output jsonl.")
     parser.add_argument("--output_summary", type=str, default=None, help="Summary json path.")
@@ -828,6 +831,8 @@ def main() -> None:
     result_dir = os.path.normpath(args.result_dir)
     if not os.path.isdir(result_dir):
         raise ValueError(f"result_dir does not exist or is not a directory: {result_dir}")
+    if not args.vllm_model_path or args.vllm_model_path == "<VLLM_MODEL_PATH>":
+        raise ValueError("Please provide --vllm_model_path.")
 
     max_candidate_images = args.max_candidate_images
     if max_candidate_images is not None and max_candidate_images <= 0:

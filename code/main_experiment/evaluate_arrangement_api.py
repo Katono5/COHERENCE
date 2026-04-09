@@ -19,8 +19,8 @@ try:
 except ImportError:
     from main_experiment.metrics import kendall_tau_mapped_0_1
 
-# Image root directory
-IMAGES_ROOT = "Your Path Here"
+# Image root directory (relative path)
+IMAGES_ROOT = "../../datasets/images"
 PLACEHOLDER = "[IMAGE_PLACEHOLDER]"
 
 
@@ -331,16 +331,16 @@ def build_raw_input(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_image_url(full_path: str, image_url_mode: str) -> Tuple[Optional[str], Optional[str]]:
-    abs_path = os.path.abspath(full_path)
+    norm_path = os.path.normpath(full_path)
     if image_url_mode == "data_uri":
-        b64 = image_to_base64(abs_path)
+        b64 = image_to_base64(norm_path)
         if not b64:
-            return None, f"image_encode_failed: {abs_path}"
+            return None, f"image_encode_failed: {norm_path}"
         return f"data:image/jpeg;base64,{b64}", None
     if image_url_mode == "file_url":
-        return f"file://{abs_path}", None
+        return f"file://{norm_path}", None
     if image_url_mode == "local_path":
-        return abs_path, None
+        return norm_path, None
     return None, f"unknown_image_url_mode: {image_url_mode}"
 
 
@@ -398,6 +398,73 @@ def partial_match(pred: List[int], answer: List[int], num_placeholders: Optional
     return kendall_tau_mapped_0_1(pred, answer, num_placeholders)
 
 
+def _summarize_exception(exc: Exception, max_body_chars: int = 300) -> str:
+    """Build a compact error string that keeps HTTP status/body when available."""
+    status_code = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+
+    body_text: Optional[str] = None
+    if body is not None:
+        if isinstance(body, str):
+            body_text = body
+        else:
+            try:
+                body_text = json.dumps(body, ensure_ascii=False)
+            except Exception:
+                body_text = str(body)
+    elif response is not None:
+        body_text = getattr(response, "text", None)
+
+    if isinstance(body_text, str):
+        body_text = body_text.strip().replace("\n", " ")
+        if len(body_text) > max_body_chars:
+            body_text = body_text[:max_body_chars] + "...(truncated)"
+    else:
+        body_text = None
+
+    parts = [f"{type(exc).__name__}: {exc}"]
+    if status_code is not None:
+        parts.insert(0, f"status={status_code}")
+    if body_text:
+        parts.append(f"body={body_text}")
+    return " | ".join(parts)
+
+
+def create_chat_completion_with_token_fallback(
+    client: Any,
+    req_kwargs: Dict[str, Any],
+    max_tokens: int,
+) -> Any:
+    """
+    Create chat completion with robust token-parameter fallback.
+
+    Some OpenAI-compatible backends only support one of:
+    - max_completion_tokens
+    - max_tokens
+    """
+    try:
+        return client.chat.completions.create(
+            max_completion_tokens=max_tokens,
+            **req_kwargs,
+        )
+    except Exception as first_error:
+        first_summary = _summarize_exception(first_error)
+
+    try:
+        return client.chat.completions.create(
+            max_tokens=max_tokens,
+            **req_kwargs,
+        )
+    except Exception as second_error:
+        second_summary = _summarize_exception(second_error)
+        raise RuntimeError(
+            "chat.completions.create failed with both token parameters; "
+            f"first(max_completion_tokens): {first_summary}; "
+            f"second(max_tokens): {second_summary}"
+        ) from second_error
+
+
 def evaluate_api(
     api_base: str,
     api_key: str,
@@ -434,24 +501,11 @@ def evaluate_api(
             "messages": messages,
             "temperature": temperature,
         }
-        # Align with the vLLM path: prefer max_completion_tokens, then fall back to max_tokens if unsupported.
-        try:
-            return client.chat.completions.create(
-                max_completion_tokens=max_tokens,
-                **req_kwargs,
-            )
-        except Exception as e:
-            err_text = str(e)
-            need_fallback = (
-                "max_completion_tokens" in err_text
-                and ("unexpected" in err_text.lower() or "unknown" in err_text.lower())
-            )
-            if not need_fallback:
-                raise
-            return client.chat.completions.create(
-                max_tokens=max_tokens,
-                **req_kwargs,
-            )
+        return create_chat_completion_with_token_fallback(
+            client=client,
+            req_kwargs=req_kwargs,
+            max_tokens=max_tokens,
+        )
 
     def extract_message_content_and_reasoning(resp: Any) -> Tuple[str, Optional[Any]]:
         choices = getattr(resp, "choices", None)
@@ -547,8 +601,6 @@ def evaluate_api(
         )
         return {
             "mode": "api",
-            "api_base": api_base,
-            "api_model": api_model,
             "total": total,
             "exact_correct": int(exact_correct),
             "exact_accuracy": exact_acc,
@@ -563,7 +615,7 @@ def evaluate_api(
     write_lock = threading.Lock()
     print(
         f"API evaluation started. Total samples={total}, pending this run={len(pending_items)}, "
-        f"model={api_model}, concurrency={batch_size}, image_url_mode={image_url_mode}"
+        f"concurrency={batch_size}, image_url_mode={image_url_mode}"
     )
 
     def process_single_item(idx: int, item: Dict[str, Any]) -> Dict[str, Any]:
@@ -640,9 +692,9 @@ def evaluate_api(
                     generated_text, reasoning_content = extract_message_content_and_reasoning(resp)
                     chosen_image_url_mode = mode
                     break
-                except Exception as e:
+                except Exception:
                     api_errors.append(
-                        f"attempt_{attempt_idx}:{mode}: {type(e).__name__}: {e}"
+                        f"attempt_{attempt_idx}:{mode}: request_failed"
                     )
 
             if redacted_content_in_attempt:
@@ -758,8 +810,6 @@ def evaluate_api(
 
     return {
         "mode": "api",
-        "api_base": api_base,
-        "api_model": api_model,
         "total": total,
         "exact_correct": int(exact_correct),
         "exact_accuracy": exact_acc,

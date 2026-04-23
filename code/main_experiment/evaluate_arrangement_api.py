@@ -374,12 +374,17 @@ def build_api_content_parts(
 
 _LIST_RE = re.compile(r"\[([0-9,\s]+)\]")
 
-
 def parse_prediction_list(text: str) -> Optional[List[int]]:
-    """Parse the last [0,1,2,...] list from model output."""
+    """Parse [0,1,2,...] list from the last line of model output only."""
     if not text:
         return None
-    matches = _LIST_RE.findall(text)
+
+    stripped_text = text.rstrip()
+    if not stripped_text:
+        return None
+    last_line = stripped_text.splitlines()[-1]
+
+    matches = _LIST_RE.findall(last_line)
     if not matches:
         return None
     inner = matches[-1]

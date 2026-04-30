@@ -802,7 +802,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max_candidate_images",
         type=int,
-        default=5,
+        default=0,
         help=(
             "Only analyze wrong cases whose candidate-image count is <= this value. "
             "Set <=0 to disable the filter."

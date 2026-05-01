@@ -7,7 +7,7 @@ This repository contains the evaluation code for **COHERENCE**.
     <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-COHERENCE-fcc624?style=for-the-badge&logo=huggingface&logoColor=black" alt="Hugging Face Dataset">
   </a>
   <a href="https://arxiv.org/abs/2604.27389">
-    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Paper-Coming%20Soon-4c78ff?style=for-the-badge" alt="Paper">
+    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Paper-Arxiv-4c78ff?style=for-the-badge" alt="Paper">
   </a>
   <a href=".">
     <img src="https://img.shields.io/badge/%F0%9F%90%99%20GitHub-Evaluation%20Code-181717?style=for-the-badge&logo=github" alt="GitHub Evaluation Code">

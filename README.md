@@ -6,8 +6,8 @@ This repository contains the evaluation code for **COHERENCE**.
   <a href="https://huggingface.co/datasets/BingliW/COHERENCE">
     <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-COHERENCE-fcc624?style=for-the-badge&logo=huggingface&logoColor=black" alt="Hugging Face Dataset">
   </a>
-  <a href="#">
-    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Paper-Coming%20Soon-4c78ff?style=for-the-badge" alt="Paper Coming Soon">
+  <a href="https://arxiv.org/abs/2604.27389">
+    <img src="https://img.shields.io/badge/%F0%9F%93%9A%20Paper-Coming%20Soon-4c78ff?style=for-the-badge" alt="Paper">
   </a>
   <a href=".">
     <img src="https://img.shields.io/badge/%F0%9F%90%99%20GitHub-Evaluation%20Code-181717?style=for-the-badge&logo=github" alt="GitHub Evaluation Code">
@@ -21,18 +21,6 @@ In recent years, Multimodal Large Language Models (MLLMs) have achieved strong p
 In addition, models must integrate evidence across paragraphs and modalities for reasoning. Although this capability is important for practical applications, systematic benchmarks for quantifying fine-grained understanding in interleaved image-text context are still limited.
 
 To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in interleaved multimodal context. COHERENCE covers four representative domains and contains **7,670** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
-
-## Results Snapshot
-
-To keep this README clean, we provide concise highlights instead of large tables.
-(`Exact` = exact-match accuracy, `Partial/Kendall` = Kendall-based partial score.)
-
-### Main Results
-
-- Best open-source overall model: `Qwen3.5 397B-A17` with `64.81 Exact / 88.37 Partial`.
-- Best closed-source overall model: `Gemini-3.1-pro-preview-thinking` with `71.82 Exact / 90.11 Partial`.
-- Strong closed-source runner-up: `GPT-5.4-high` with `71.29 Exact / 86.54 Partial`.
-- Domain bests (closed-source): `Gemini-3.1-pro-preview-thinking` leads on `WikiHow` and `StoryBird`, while `GPT-5.4-high` leads on `Cooking` and `Science`.
 
 ## Repository Structure
 
@@ -170,9 +158,17 @@ python code/main_experiment/error_analysis.py --help
 
 If you use COHERENCE, please cite:
 
-**COHERENCE: Benchmarking Fine-Grained Image-Text Alignment in Interleaved Multimodal Contexts**
-
-BibTeX will be added after paper release.
+```
+@misc{wang2026coherencebenchmarkingfinegrainedimagetext,
+      title={COHERENCE: Benchmarking Fine-Grained Image-Text Alignment in Interleaved Multimodal Contexts}, 
+      author={Bingli Wang and Huanze Tang and Haijun Lv and Zhishan Lin and Lixin Gu and Lei Feng and Qipeng Guo and Kai Chen},
+      year={2026},
+      eprint={2604.27389},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.27389}, 
+}
+```
 
 ## License
 

@@ -20,7 +20,7 @@ In recent years, Multimodal Large Language Models (MLLMs) have achieved strong p
 
 In addition, models must integrate evidence across paragraphs and modalities for reasoning. Although this capability is important for practical applications, systematic benchmarks for quantifying fine-grained understanding in interleaved image-text context are still limited.
 
-To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in interleaved multimodal context. COHERENCE covers four representative domains and contains **7,670** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
+To fill this gap, we propose **COHERENCE**, a benchmark designed to evaluate the ability of MLLMs to recover fine-grained image-text correspondences in interleaved multimodal context. COHERENCE covers four representative domains and contains **6,161** high-quality questions. We also provide a six-type error analysis protocol for fine-grained attribution of failures in interleaved image-text understanding.
 
 ## Repository Structure
 
